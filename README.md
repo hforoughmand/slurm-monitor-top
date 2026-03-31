@@ -19,22 +19,21 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 - Slurm CLI commands available in PATH:
   - `squeue`
   - `sinfo`
-- Python packages:
-  - `textual`
-  - `rich`
+- Python packages: see `requirements.txt` (main dependencies: `textual`, `rich`)
 
 ## Install
 
+Create and activate a [virtual environment](https://docs.python.org/3/library/venv.html), then:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install textual rich
+pip install -r requirements.txt
 ```
 
 ## Run
 
+With that environment activated:
+
 ```bash
-source .venv/bin/activate
 python stop.py
 ```
 
