@@ -3,13 +3,13 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "slurm-top"
+name = "slurm-monitor-top"
 version = "0.1.0"
 description = "htop-like monitor for Slurm jobs"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
-authors = [{name = "slurm-top contributors"}]
+authors = [{name = "slurm-monitor-top contributors"}]
 dependencies = [
   "rich",
   "textual",

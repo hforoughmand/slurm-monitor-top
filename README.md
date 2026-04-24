@@ -39,7 +39,7 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 Install from PyPI:
 
 ```bash
-pip install slurm-top
+pip install slurm-monitor-top
 ```
 
 For local development (editable install), create and activate a [virtual environment](https://docs.python.org/3/library/venv.html), then:
