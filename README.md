@@ -4,8 +4,8 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 
 ## Project Links
 
-- GitHub: [hforoughmand/slurm-top](https://github.com/hforoughmand/slurm-top)
-- Issues: [github.com/hforoughmand/slurm-top/issues](https://github.com/hforoughmand/slurm-top/issues)
+- GitHub: [hforoughmand/slurm-monitor-top](https://github.com/hforoughmand/slurm-monitor-top)
+- Issues: [github.com/hforoughmand/slurm-monitor-top/issues](https://github.com/hforoughmand/slurm-monitor-top/issues)
 
 ## Screenshot
 
