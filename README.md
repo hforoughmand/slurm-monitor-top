@@ -83,6 +83,13 @@ twine check dist/*
 - `s` toggle sort-pick mode
 - `d` asc/desc
 - `f` owner filter (`all`, `me`, `others`)
+- `Enter` open selected job details popup
+- In job details popup:
+  - `c` cancel job
+  - `h` hold job
+  - `u` release job
+  - `r` requeue job
+  - `Esc` close popup
 
 ## Panels
 

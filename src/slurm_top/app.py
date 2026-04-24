@@ -4,14 +4,16 @@ import re
 import shlex
 import subprocess
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Key
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Static
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Static
 
 
 @dataclass
@@ -47,6 +49,24 @@ def run_cmd(cmd: str) -> str:
         return out
     except Exception:
         return ""
+
+
+def run_cmd_checked(args: List[str]) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(args, check=False, text=True, capture_output=True)
+        ok = completed.returncode == 0
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        lines = [f"exit_code={completed.returncode}"]
+        if stdout:
+            lines.append(f"stdout: {stdout}")
+        if stderr:
+            lines.append(f"stderr: {stderr}")
+        if not stdout and not stderr:
+            lines.append("no output")
+        return ok, " | ".join(lines)
+    except Exception as exc:
+        return False, str(exc)
 
 
 def parse_squeue() -> List[Job]:
@@ -288,70 +308,85 @@ def summarize_gpus(nodes: List[Node], jobs: List[Job]) -> Dict[str, object]:
     return {"total": total, "types_count": len(per_type), "per_type": per_type, "per_type_stats": per_type_stats, "active": active, "reserved": reserved, "free_est": max(0, total - active)}
 
 
-class JobsView(Static):
+class JobsView(DataTable[str]):
+    BINDINGS = [
+        ("s", "open_sort_menu", "Sort"),
+        ("d", "toggle_sort_direction", "Asc/Desc"),
+        ("f", "cycle_owner_filter", "Owner"),
+        ("enter", "open_details", "Details"),
+    ]
     jobs: reactive[List[Job]] = reactive([])  # type: ignore
     owner_filter: reactive[str] = reactive("all")  # type: ignore
     state_filter: reactive[str] = reactive("all")  # type: ignore
     sort_key: reactive[str] = reactive("state")  # type: ignore
     sort_desc: reactive[bool] = reactive(False)  # type: ignore
-    sort_pick_mode: reactive[bool] = reactive(False)  # type: ignore
     user: str = os.environ.get("USER", "")
+    _display_jobs: List[Job]
 
-    def render(self) -> Table:
-        title = "Slurm Jobs " f"(s: pick sort, d: {'desc' if self.sort_desc else 'asc'}, " f"f: owner={self.owner_filter}, state={self.state_filter})"
-        if self.sort_pick_mode:
-            title += " | pick sort: 1-state 2-jobid 3-user 4-part 5-cpus 6-gpus 7-mem 8-time"
-        table = Table(title=title)
-        table.add_column("JOBID", justify="right", no_wrap=True)
-        table.add_column("USER", style="cyan")
-        table.add_column("STATE", style="bold")
-        table.add_column("PART", style="magenta")
-        table.add_column("NAME", overflow="fold")
-        table.add_column("NODES")
-        table.add_column("CPUS")
-        table.add_column("GPUS")
-        table.add_column("MEM")
-        table.add_column("TIME")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._display_jobs = []
 
-        def include_owner(job: Job) -> bool:
-            if self.owner_filter == "all":
-                return True
-            if self.owner_filter == "me":
-                return job.user == self.user
-            return job.user != self.user
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self.add_columns("JOBID", "USER", "STATE", "PART", "NAME", "NODES", "CPUS", "GPUS", "MEM", "TIME")
+        self.refresh_table()
 
-        def include_state(job: Job) -> bool:
-            st = job.state.upper()
-            if self.state_filter == "all":
-                return True
-            if self.state_filter == "running":
-                return st.startswith("R")
-            if self.state_filter == "pending":
-                return st.startswith("P")
-            return not st.startswith("R") and not st.startswith("P")
+    def _build_title(self) -> str:
+        return "Slurm Jobs " f"(Enter: details, s: sort menu, d: {'desc' if self.sort_desc else 'asc'}, " f"f: owner={self.owner_filter}, state={self.state_filter})"
 
-        def sort_value(job: Job):
-            if self.sort_key == "jobid":
-                return _job_id_sort_key(job.job_id)
-            if self.sort_key == "user":
-                return job.user.lower()
-            if self.sort_key == "partition":
-                return job.partition.lower()
-            if self.sort_key == "cpus":
-                return _parse_int(job.ncpus)
-            if self.sort_key == "gpus":
-                return _parse_gpu_count(job.gpus)
-            if self.sort_key == "mem":
-                return _parse_mem_to_mb(job.mem)
-            if self.sort_key == "time":
-                return job.time_used
-            if self.sort_key == "state":
-                return (_job_state_rank(job.state), _job_id_sort_key(job.job_id))
-            return job.job_id
+    def _update_title(self) -> None:
+        selected = self.get_selected_job()
+        hint = f" | selected {selected.job_id}: Enter opens details" if selected else ""
+        self.title = self._build_title() + hint
 
-        jobs = [j for j in self.jobs if include_owner(j) and include_state(j)]
-        jobs = sorted(jobs, key=sort_value, reverse=self.sort_desc)
-        for j in jobs:
+    def _include_owner(self, job: Job) -> bool:
+        if self.owner_filter == "all":
+            return True
+        if self.owner_filter == "me":
+            return job.user == self.user
+        return job.user != self.user
+
+    def _include_state(self, job: Job) -> bool:
+        st = job.state.upper()
+        if self.state_filter == "all":
+            return True
+        if self.state_filter == "running":
+            return st.startswith("R")
+        if self.state_filter == "pending":
+            return st.startswith("P")
+        return not st.startswith("R") and not st.startswith("P")
+
+    def _sort_value(self, job: Job):
+        if self.sort_key == "jobid":
+            return _job_id_sort_key(job.job_id)
+        if self.sort_key == "user":
+            return job.user.lower()
+        if self.sort_key == "partition":
+            return job.partition.lower()
+        if self.sort_key == "cpus":
+            return _parse_int(job.ncpus)
+        if self.sort_key == "gpus":
+            return _parse_gpu_count(job.gpus)
+        if self.sort_key == "mem":
+            return _parse_mem_to_mb(job.mem)
+        if self.sort_key == "time":
+            return job.time_used
+        if self.sort_key == "state":
+            return (_job_state_rank(job.state), _job_id_sort_key(job.job_id))
+        return job.job_id
+
+    def refresh_table(self) -> None:
+        selected_job_id = None
+        selected = self.get_selected_job()
+        if selected:
+            selected_job_id = selected.job_id
+
+        self.clear(columns=False)
+        self._display_jobs = [j for j in self.jobs if self._include_owner(j) and self._include_state(j)]
+        self._display_jobs = sorted(self._display_jobs, key=self._sort_value, reverse=self.sort_desc)
+        for j in self._display_jobs:
             style = None
             if j.state.upper().startswith("R"):
                 style = "green"
@@ -359,8 +394,56 @@ class JobsView(Static):
                 style = "yellow"
             elif j.state.upper().startswith("F"):
                 style = "red"
-            table.add_row(j.job_id, j.user, Text(j.state, style=style), j.partition, j.name, j.nodes, j.ncpus, str(_parse_gpu_count(j.gpus)), j.mem, j.time_used)
-        return table
+            self.add_row(j.job_id, j.user, Text(j.state, style=style), j.partition, j.name, j.nodes, j.ncpus, str(_parse_gpu_count(j.gpus)), j.mem, j.time_used)
+
+        self._update_title()
+        if not self._display_jobs:
+            return
+
+        if selected_job_id:
+            for row_idx, job in enumerate(self._display_jobs):
+                if job.job_id == selected_job_id:
+                    self.move_cursor(row=row_idx)
+                    self._update_title()
+                    return
+        self.move_cursor(row=0)
+        self._update_title()
+
+    def get_selected_job(self) -> Optional[Job]:
+        row = self.cursor_row
+        if row is None or row < 0 or row >= len(self._display_jobs):
+            return None
+        return self._display_jobs[row]
+
+    def watch_jobs(self, _old: List[Job], _new: List[Job]) -> None:
+        self.refresh_table()
+
+    def watch_owner_filter(self, _old: str, _new: str) -> None:
+        self.refresh_table()
+
+    def watch_state_filter(self, _old: str, _new: str) -> None:
+        self.refresh_table()
+
+    def watch_sort_key(self, _old: str, _new: str) -> None:
+        self.refresh_table()
+
+    def watch_sort_desc(self, _old: bool, _new: bool) -> None:
+        self.refresh_table()
+
+    async def action_open_sort_menu(self) -> None:
+        await self.app.action_open_sort_picker()
+
+    async def action_toggle_sort_direction(self) -> None:
+        await self.app.action_toggle_sort_direction()
+
+    async def action_cycle_owner_filter(self) -> None:
+        await self.app.action_cycle_owner_filter()
+
+    async def action_open_details(self) -> None:
+        await self.app.action_open_selected_job()
+
+    def on_data_table_row_highlighted(self) -> None:
+        self._update_title()
 
 
 class NodesView(Static):
@@ -435,6 +518,169 @@ class SummaryBar(Static):
         return table
 
 
+class JobDetailsModal(ModalScreen[None]):
+    BINDINGS = [
+        ("enter", "dismiss", "Close"),
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+        ("c", "cancel_job", "Cancel"),
+        ("h", "hold_job", "Hold"),
+        ("u", "release_job", "Release"),
+        ("r", "requeue_job", "Requeue"),
+    ]
+
+    def __init__(self, job: Job) -> None:
+        super().__init__()
+        self.job = job
+
+    def compose(self) -> ComposeResult:
+        details = [
+            f"Job ID   : {self.job.job_id}",
+            f"User     : {self.job.user}",
+            f"State    : {self.job.state}",
+            f"Part     : {self.job.partition}",
+            f"Name     : {self.job.name}",
+            f"Nodes    : {self.job.nodes}",
+            f"CPUs     : {self.job.ncpus}",
+            f"GPUs     : {_parse_gpu_count(self.job.gpus)} ({self.job.gpus})",
+            f"Memory   : {self.job.mem}",
+            f"Run Time : {self.job.time_used}",
+        ]
+        yield Static("\n".join(details), id="job-details-body")
+        yield DataTable(id="job-actions")
+        yield Static("Status: waiting for action", id="job-details-status")
+
+    def on_mount(self) -> None:
+        actions = self.query_one("#job-actions", DataTable)
+        actions.cursor_type = "cell"
+        actions.zebra_stripes = False
+        actions.show_header = False
+        actions.add_columns("", "", "", "", "")
+        actions.add_row("c Cancel", "h Hold", "u Release", "r Requeue", "Enter/Esc/q Close")
+        actions.cursor_background_priority = "css"
+        actions.cursor_foreground_priority = "css"
+        actions.move_cursor(row=0, column=4)
+        self.set_focus(actions)
+
+    async def _run_action_by_column(self, column: int) -> None:
+        self.query_one("#job-details-status", Static).update("Status: running action...")
+        if column == 0:
+            await self.action_cancel_job()
+            return
+        if column == 1:
+            await self.action_hold_job()
+            return
+        if column == 2:
+            await self.action_release_job()
+            return
+        if column == 3:
+            await self.action_requeue_job()
+            return
+        if column == 4:
+            self.dismiss()
+            return
+
+    async def _run_job_action(self, command: List[str], action_name: str) -> None:
+        ok, output = run_cmd_checked(command)
+        status = f"Status: {action_name} {'OK' if ok else 'FAILED'} - {output}"
+        self.query_one("#job-details-status", Static).update(status)
+        if ok:
+            await self.app.refresh_data()
+
+    async def action_cancel_job(self) -> None:
+        await self._run_job_action(["scancel", self.job.job_id], "cancel")
+
+    async def action_hold_job(self) -> None:
+        await self._run_job_action(["scontrol", "hold", self.job.job_id], "hold")
+
+    async def action_release_job(self) -> None:
+        await self._run_job_action(["scontrol", "release", self.job.job_id], "release")
+
+    async def action_requeue_job(self) -> None:
+        await self._run_job_action(["scontrol", "requeue", self.job.job_id], "requeue")
+
+    async def on_key(self, event: Key) -> None:
+        if event.key != "enter":
+            return
+        actions = self.query_one("#job-actions", DataTable)
+        if self.focused is not actions:
+            return
+        event.stop()
+        column = actions.cursor_column
+        if column is None:
+            return
+        await self._run_action_by_column(column)
+
+    async def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        if event.data_table.id != "job-actions":
+            return
+        await self._run_action_by_column(event.coordinate.column)
+
+
+class SortPickerModal(ModalScreen[None]):
+    BINDINGS = [
+        ("enter", "apply_selected", "Apply"),
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    OPTIONS = [
+        ("state", "State", "1"),
+        ("jobid", "Job ID", "2"),
+        ("user", "User", "3"),
+        ("partition", "Partition", "4"),
+        ("cpus", "CPUs", "5"),
+        ("gpus", "GPUs", "6"),
+        ("mem", "Memory", "7"),
+        ("time", "Time", "8"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("Sort by: choose row + Enter, or press hotkey 1..8", id="sort-help")
+        yield DataTable(id="sort-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#sort-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_columns("Key", "Field")
+        for _, label, hotkey in self.OPTIONS:
+            table.add_row(hotkey, label)
+        table.move_cursor(row=0)
+        self.set_focus(table)
+
+    async def _apply_sort_index(self, index: int) -> None:
+        if index < 0 or index >= len(self.OPTIONS):
+            return
+        sort_key, label, _ = self.OPTIONS[index]
+        app = self.app
+        if isinstance(app, SlurmHtop):
+            app.jobs_view.sort_key = sort_key
+            app.notify(f"Sort by {label.lower()}")
+        self.dismiss()
+
+    async def action_apply_selected(self) -> None:
+        table = self.query_one("#sort-table", DataTable)
+        row = table.cursor_row
+        if row is None:
+            return
+        await self._apply_sort_index(row)
+
+    async def on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            await self.action_apply_selected()
+            return
+        if event.key in {"1", "2", "3", "4", "5", "6", "7", "8"}:
+            event.stop()
+            await self._apply_sort_index(int(event.key) - 1)
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "sort-table":
+            return
+        await self._apply_sort_index(event.cursor_row)
+
+
 class SlurmHtop(App):
     TITLE = "slurm-top"
     CSS = """
@@ -444,16 +690,60 @@ class SlurmHtop(App):
     #nodes-column { width: 2fr; height: 1fr; }
     #jobs-scroll { height: 1fr; }
     #summary { height: auto; }
-    #nodes-scroll { height: 2fr; }
-    #gpu-scroll { height: 1fr; }
+    #summary, #gpu-status {
+        content-align: center middle;
+    }
+    #nodes-scroll { height: 1fr; }
     #nodes { height: auto; }
     #gpu-status { height: auto; }
+    JobDetailsModal {
+        align: center middle;
+    }
+    SortPickerModal {
+        align: center middle;
+    }
+    #job-details-body {
+        width: 80;
+        border: round $accent;
+        padding: 1 2;
+        background: $surface;
+    }
+    #job-details-status {
+        width: 80;
+        border: round $boost;
+        padding: 0 2;
+        background: $surface;
+    }
+    #job-actions {
+        width: 80;
+        height: 3;
+        border: round $boost;
+        background: $surface;
+    }
+    #job-actions:focus {
+        border: round $accent;
+    }
+    #job-actions > .datatable--cursor {
+        background: $accent 60%;
+        color: $text;
+        text-style: bold;
+    }
+    #sort-help {
+        width: 44;
+        border: round $panel;
+        padding: 0 1;
+    }
+    #sort-table {
+        width: 44;
+        height: 10;
+        border: round $accent;
+    }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("r", "refresh", "Ref"),
-        ("s", "toggle_sort_pick_mode", "Sort"),
+        ("r", "refresh", "Refresh"),
+        ("s", "open_sort_picker", "Sort"),
         ("d", "toggle_sort_direction", "Asc/Desc"),
         ("f", "cycle_owner_filter", "Owner"),
     ]
@@ -478,11 +768,11 @@ class SlurmHtop(App):
             with Vertical(id="nodes-column"):
                 with VerticalScroll(id="nodes-scroll"):
                     yield self.nodes_view
-                with VerticalScroll(id="gpu-scroll"):
-                    yield self.gpu_status_view
+                yield self.gpu_status_view
         yield Footer()
 
     async def on_mount(self) -> None:
+        self.set_focus(self.jobs_view)
         self._task = asyncio.create_task(self.poll_loop())
 
     async def poll_loop(self) -> None:
@@ -501,8 +791,8 @@ class SlurmHtop(App):
     async def action_refresh(self) -> None:
         await self.refresh_data()
 
-    async def action_toggle_sort_pick_mode(self) -> None:
-        self.jobs_view.sort_pick_mode = not self.jobs_view.sort_pick_mode
+    async def action_open_sort_picker(self) -> None:
+        await self.push_screen(SortPickerModal())
 
     async def action_toggle_sort_direction(self) -> None:
         self.jobs_view.sort_desc = not self.jobs_view.sort_desc
@@ -512,6 +802,12 @@ class SlurmHtop(App):
         idx = options.index(self.jobs_view.owner_filter) if self.jobs_view.owner_filter in options else 0
         self.jobs_view.owner_filter = options[(idx + 1) % len(options)]
 
+    async def action_open_selected_job(self) -> None:
+        selected_job = self.jobs_view.get_selected_job()
+        if not selected_job:
+            self.notify("No job selected")
+            return
+        await self.push_screen(JobDetailsModal(selected_job))
 
 def main() -> None:
     SlurmHtop().run()
