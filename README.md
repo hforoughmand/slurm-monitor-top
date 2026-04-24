@@ -30,7 +30,7 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 Create and activate a [virtual environment](https://docs.python.org/3/library/venv.html), then:
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ## Run
@@ -38,7 +38,21 @@ pip install -r requirements.txt
 With that environment activated:
 
 ```bash
+stop
+```
+
+You can still run it directly during development:
+
+```bash
 python stop.py
+```
+
+## Build Package
+
+```bash
+python -m pip install --upgrade build twine
+python -m build
+twine check dist/*
 ```
 
 ## Keybindings
