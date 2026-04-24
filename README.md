@@ -9,7 +9,7 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 
 ## Screenshot
 
-![slurm-top screenshot](assets/screenshot-01.png)
+![slurm-top screenshot](https://github.com/hforoughmand/slurm-monitor-top/blob/main/assets/screenshot-01.png)
 
 ## Features
 
