@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
-from slurm_stop.app import main
+from slurm_top.app import main
 
 
 if __name__ == "__main__":

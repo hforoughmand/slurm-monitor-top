@@ -2,6 +2,15 @@
 
 A terminal dashboard for Slurm clusters, inspired by `htop`.
 
+## Project Links
+
+- GitHub: [hforoughmand/slurm-top](https://github.com/hforoughmand/slurm-top)
+- Issues: [github.com/hforoughmand/slurm-top/issues](https://github.com/hforoughmand/slurm-top/issues)
+
+## Screenshot
+
+![slurm-top screenshot](assets/screenshot-01.png)
+
 ## Features
 
 - Live jobs table with interactive sort and filters
@@ -27,7 +36,13 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 
 ## Install
 
-Create and activate a [virtual environment](https://docs.python.org/3/library/venv.html), then:
+Install from PyPI:
+
+```bash
+pip install slurm-top
+```
+
+For local development (editable install), create and activate a [virtual environment](https://docs.python.org/3/library/venv.html), then:
 
 ```bash
 pip install -e .
@@ -36,6 +51,12 @@ pip install -e .
 ## Run
 
 With that environment activated:
+
+```bash
+slurm-top
+```
+
+Alias command also works:
 
 ```bash
 stop

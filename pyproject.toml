@@ -3,20 +3,21 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "slurm-stop"
+name = "slurm-top"
 version = "0.1.0"
 description = "htop-like monitor for Slurm jobs"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
-authors = [{name = "slurm-stop contributors"}]
+authors = [{name = "slurm-top contributors"}]
 dependencies = [
   "rich",
   "textual",
 ]
 
 [project.scripts]
-stop = "slurm_stop.cli:main"
+slurm-top = "slurm_top.cli:main"
+stop = "slurm_top.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

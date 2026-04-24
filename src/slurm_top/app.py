@@ -436,11 +436,12 @@ class SummaryBar(Static):
 
 
 class SlurmHtop(App):
+    TITLE = "slurm-top"
     CSS = """
     Screen { layout: vertical; }
     #main-split { height: 1fr; }
-    #left-column { width: 2fr; height: 1fr; }
-    #nodes-column { width: 1fr; height: 1fr; }
+    #left-column { width: 3fr; height: 1fr; }
+    #nodes-column { width: 2fr; height: 1fr; }
     #jobs-scroll { height: 1fr; }
     #summary { height: auto; }
     #nodes-scroll { height: 2fr; }
