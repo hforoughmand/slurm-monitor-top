@@ -4,13 +4,17 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 
 ## Features
 
-- Live jobs table (all jobs, with optional "my jobs" filter)
+- Live jobs table with interactive sort and filters
 - Live node/server table (CPU and memory totals, reserved, and free)
 - Job statistics split by:
   - all users
   - your jobs
   - other users
-- Live search on jobs with `/`
+- GPU status under nodes:
+  - number of GPU types
+  - total GPUs
+  - active GPUs (running jobs)
+  - reserved GPUs (pending jobs)
 - Auto refresh every 3 seconds
 
 ## Requirements
@@ -40,23 +44,19 @@ python stop.py
 ## Keybindings
 
 - `q` quit
-- `r` refresh now
-- `f` toggle "only my jobs"
-- `/` open search input and filter jobs
-- `Esc` clear search and close search input
-- `Enter` close search input (keeps current filter)
+- `r` refresh
+- `s` toggle sort-pick mode
+- `d` asc/desc
+- `f` owner filter (`all`, `me`, `others`)
 
 ## Panels
 
 - **Left panel (Jobs)**
-  - Sorted by importance:
-    1. running
-    2. completing
-    3. pending
-    4. other states
-  - Older jobs (smaller job ID) first inside each state group
+  - Interactive sorting and filtering (see keybindings)
+  - Includes GPU count per job
 
 - **Right panel (Nodes)**
+  - Uses full right-column height
   - Node state
   - CPU total/allocated/idle
   - Memory:
@@ -64,11 +64,17 @@ python stop.py
     - reserved
     - free
   - Memory is displayed in human-readable units (`M`, `G`, `T`)
+  - GPU total per node
+
+- **GPU status (under Nodes)**
+  - Cluster totals: total / active / reserved / free estimate
+  - Per GPU type: total / active / reserved / free estimate
 
 - **Bottom panel (Job statistics)**
   - Per owner bucket: all / me / others
   - For running and pending:
     - jobs count
+    - GPU sum
     - CPU sum
     - memory sum
 

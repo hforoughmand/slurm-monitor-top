@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -8,9 +9,9 @@ from typing import List, Dict
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static, Input
+from textual.widgets import Header, Footer, Static
 from textual.reactive import reactive
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 
 
 @dataclass
@@ -23,6 +24,7 @@ class Job:
     nodes: str
     ncpus: str
     mem: str
+    gpus: str
     time_used: str
 
 
@@ -36,6 +38,7 @@ class Node:
     mem_total: str
     mem_reserved: str
     mem_free: str
+    gres: str
 
 
 def run_cmd(cmd: str) -> str:
@@ -52,7 +55,7 @@ def run_cmd(cmd: str) -> str:
 
 def parse_squeue() -> List[Job]:
     # Customize the output format as needed
-    format_str = "%i|%u|%T|%P|%j|%D|%C|%m|%M"
+    format_str = "%i|%u|%T|%P|%j|%D|%C|%m|%b|%M"
     raw = run_cmd(f"squeue -a -o '{format_str}'")
     lines = raw.strip().splitlines()
     jobs: List[Job] = []
@@ -60,7 +63,7 @@ def parse_squeue() -> List[Job]:
     # Skip header if present
     for line in lines[1:]:
         parts = line.split("|")
-        if len(parts) != 9:
+        if len(parts) != 10:
             continue
         jobs.append(
             Job(
@@ -72,21 +75,22 @@ def parse_squeue() -> List[Job]:
                 nodes=parts[5].strip(),
                 ncpus=parts[6].strip(),
                 mem=parts[7].strip(),
-                time_used=parts[8].strip(),
+                gpus=parts[8].strip(),
+                time_used=parts[9].strip(),
             )
         )
     return jobs
 
 
 def parse_sinfo() -> List[Node]:
-    format_str = "%n|%t|%c|%C|%m|%e"
+    format_str = "%n|%t|%c|%C|%m|%e|%G"
     raw = run_cmd(f"sinfo -o '{format_str}'")
     lines = raw.strip().splitlines()
     nodes: List[Node] = []
 
     for line in lines[1:]:
         parts = line.split("|")
-        if len(parts) != 6:
+        if len(parts) != 7:
             continue
         name = parts[0].strip()
         state = parts[1].strip()
@@ -94,6 +98,7 @@ def parse_sinfo() -> List[Node]:
         c_state = parts[3].strip()  # format: "alloc/idle/other"
         mem_total = parts[4].strip()
         mem_free = parts[5].strip()
+        gres = parts[6].strip()
 
         cpus_alloc = ""
         cpus_idle = ""
@@ -120,6 +125,7 @@ def parse_sinfo() -> List[Node]:
                 mem_total=mem_total,
                 mem_reserved=mem_reserved,
                 mem_free=mem_free,
+                gres=gres,
             )
         )
     return nodes
@@ -159,6 +165,48 @@ def _parse_mem_to_mb(value: str) -> int:
     if unit.startswith("K"):
         return int(base / 1024)
     return int(base)
+
+
+def _parse_gpu_count(value: str) -> int:
+    """Parse GPU count from Slurm TRES-per-node style strings."""
+    text = (value or "").strip().lower()
+    if not text or text in {"(null)", "n/a"}:
+        return 0
+
+    total = 0
+    for match in re.finditer(r"gpu(?::[^:,=]+)?[:=](\d+)", text):
+        try:
+            total += int(match.group(1))
+        except Exception:
+            continue
+    return total
+
+
+def _parse_gpu_per_type(value: str) -> Dict[str, int]:
+    """Parse GPU counts per type from Slurm TRES strings."""
+    text = (value or "").strip().lower()
+    if not text or text in {"(null)", "n/a"}:
+        return {}
+
+    per_type: Dict[str, int] = {}
+    for match in re.finditer(r"gpu(?::([^:,=]+))?[:=](\d+)", text):
+        gpu_type = (match.group(1) or "generic").strip() or "generic"
+        try:
+            count = int(match.group(2))
+        except Exception:
+            continue
+        per_type[gpu_type] = per_type.get(gpu_type, 0) + count
+    return per_type
+
+
+def _parse_gpu_inventory(gres: str) -> Dict[str, int]:
+    """Parse GPU totals by type from Slurm GRES strings."""
+    text = (gres or "").strip().lower()
+    if not text or text in {"(null)", "n/a"}:
+        return {}
+
+    per_type: Dict[str, int] = {}
+    return _parse_gpu_per_type(text)
 
 
 def _format_mb_human(mb: int) -> str:
@@ -201,16 +249,16 @@ def summarize_jobs(jobs: List[Job], current_user: str) -> Dict[str, Dict[str, Di
     # Nested dict: owner -> state -> metrics
     summary: Dict[str, Dict[str, Dict[str, int]]] = {
         "all": {
-            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0},
-            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0},
+            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
+            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
         },
         "me": {
-            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0},
-            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0},
+            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
+            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
         },
         "others": {
-            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0},
-            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0},
+            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
+            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
         },
     }
 
@@ -226,25 +274,82 @@ def summarize_jobs(jobs: List[Job], current_user: str) -> Dict[str, Dict[str, Di
 
         cpus = _parse_int(j.ncpus)
         mem_mb = _parse_mem_to_mb(j.mem)
+        gpus = _parse_gpu_count(j.gpus)
 
         for bucket in ("all", owner):
             summary[bucket][key]["jobs"] += 1
             summary[bucket][key]["cpus"] += cpus
             summary[bucket][key]["mem_mb"] += mem_mb
+            summary[bucket][key]["gpus"] += gpus
 
     return summary
 
 
+def summarize_gpus(nodes: List[Node], jobs: List[Job]) -> Dict[str, object]:
+    per_type: Dict[str, int] = {}
+    total = 0
+    for n in nodes:
+        inv = _parse_gpu_inventory(n.gres)
+        for gpu_type, count in inv.items():
+            per_type[gpu_type] = per_type.get(gpu_type, 0) + count
+            total += count
+
+    active = 0
+    reserved = 0
+    per_type_stats: Dict[str, Dict[str, int]] = {
+        gpu_type: {"total": total_count, "active": 0, "reserved": 0, "free_est": total_count}
+        for gpu_type, total_count in per_type.items()
+    }
+    for j in jobs:
+        gpus = _parse_gpu_count(j.gpus)
+        per_job_types = _parse_gpu_per_type(j.gpus)
+        st = j.state.upper()
+        if st.startswith("R"):
+            active += gpus
+            for gpu_type, count in per_job_types.items():
+                bucket = per_type_stats.setdefault(
+                    gpu_type, {"total": 0, "active": 0, "reserved": 0, "free_est": 0}
+                )
+                bucket["active"] += count
+        elif st.startswith("P"):
+            reserved += gpus
+            for gpu_type, count in per_job_types.items():
+                bucket = per_type_stats.setdefault(
+                    gpu_type, {"total": 0, "active": 0, "reserved": 0, "free_est": 0}
+                )
+                bucket["reserved"] += count
+
+    for bucket in per_type_stats.values():
+        bucket["free_est"] = max(0, bucket.get("total", 0) - bucket.get("active", 0))
+
+    return {
+        "total": total,
+        "types_count": len(per_type),
+        "per_type": per_type,
+        "per_type_stats": per_type_stats,
+        "active": active,
+        "reserved": reserved,
+        "free_est": max(0, total - active),
+    }
+
+
 class JobsView(Static):
     jobs: reactive[List[Job]] = reactive([])  # type: ignore
-    only_me: reactive[bool] = reactive(False)  # type: ignore
-    search_query: reactive[str] = reactive("")  # type: ignore
+    owner_filter: reactive[str] = reactive("all")  # type: ignore
+    state_filter: reactive[str] = reactive("all")  # type: ignore
+    sort_key: reactive[str] = reactive("state")  # type: ignore
+    sort_desc: reactive[bool] = reactive(False)  # type: ignore
+    sort_pick_mode: reactive[bool] = reactive(False)  # type: ignore
     user: str = os.environ.get("USER", "")
 
     def render(self) -> Table:
-        title = "Slurm Jobs (f: my jobs, /: search)"
-        if self.search_query:
-            title += f" | filter='{self.search_query}'"
+        title = (
+            "Slurm Jobs "
+            f"(s: pick sort, d: {'desc' if self.sort_desc else 'asc'}, "
+            f"f: owner={self.owner_filter}, state={self.state_filter})"
+        )
+        if self.sort_pick_mode:
+            title += " | pick sort: 1-state 2-jobid 3-user 4-part 5-cpus 6-gpus 7-mem 8-time"
         table = Table(title=title)
         table.add_column("JOBID", justify="right", no_wrap=True)
         table.add_column("USER", style="cyan")
@@ -253,29 +358,52 @@ class JobsView(Static):
         table.add_column("NAME", overflow="fold")
         table.add_column("NODES")
         table.add_column("CPUS")
+        table.add_column("GPUS")
         table.add_column("MEM")
         table.add_column("TIME")
 
-        query = self.search_query.lower().strip()
-        for j in self.jobs:
-            if self.only_me and j.user != self.user:
+        def include_owner(job: Job) -> bool:
+            if self.owner_filter == "all":
+                return True
+            if self.owner_filter == "me":
+                return job.user == self.user
+            return job.user != self.user
+
+        def include_state(job: Job) -> bool:
+            st = job.state.upper()
+            if self.state_filter == "all":
+                return True
+            if self.state_filter == "running":
+                return st.startswith("R")
+            if self.state_filter == "pending":
+                return st.startswith("P")
+            return not st.startswith("R") and not st.startswith("P")
+
+        def sort_value(job: Job):
+            if self.sort_key == "jobid":
+                return _job_id_sort_key(job.job_id)
+            if self.sort_key == "user":
+                return job.user.lower()
+            if self.sort_key == "partition":
+                return job.partition.lower()
+            if self.sort_key == "cpus":
+                return _parse_int(job.ncpus)
+            if self.sort_key == "gpus":
+                return _parse_gpu_count(job.gpus)
+            if self.sort_key == "mem":
+                return _parse_mem_to_mb(job.mem)
+            if self.sort_key == "time":
+                return job.time_used
+            if self.sort_key == "state":
+                return (_job_state_rank(job.state), _job_id_sort_key(job.job_id))
+            return job.job_id
+
+        jobs = [j for j in self.jobs if include_owner(j) and include_state(j)]
+        jobs = sorted(jobs, key=sort_value, reverse=self.sort_desc)
+
+        for j in jobs:
+            if not include_owner(j) or not include_state(j):
                 continue
-            if query:
-                haystack = " ".join(
-                    [
-                        j.job_id,
-                        j.user,
-                        j.state,
-                        j.partition,
-                        j.name,
-                        j.nodes,
-                        j.ncpus,
-                        j.mem,
-                        j.time_used,
-                    ]
-                ).lower()
-                if query not in haystack:
-                    continue
             style = None
             if j.state.upper().startswith("R"):
                 style = "green"
@@ -292,6 +420,7 @@ class JobsView(Static):
                 j.name,
                 j.nodes,
                 j.ncpus,
+                str(_parse_gpu_count(j.gpus)),
                 j.mem,
                 j.time_used,
             )
@@ -311,6 +440,7 @@ class NodesView(Static):
         table.add_column("MEM(total)")
         table.add_column("MEM(resv)")
         table.add_column("MEM(free)")
+        table.add_column("GPUs(total)")
 
         for n in self.nodes:
             state_style = "green" if n.state.startswith("idle") else "yellow"
@@ -323,7 +453,51 @@ class NodesView(Static):
                 _format_mb_human(_parse_int(n.mem_total)),
                 _format_mb_human(_parse_int(n.mem_reserved)),
                 _format_mb_human(_parse_int(n.mem_free)),
+                str(sum(_parse_gpu_inventory(n.gres).values())),
             )
+        return table
+
+
+class GpuStatusView(Static):
+    stats: reactive[Dict[str, object]] = reactive({})  # type: ignore
+
+    def render(self) -> Table:
+        s = self.stats or {
+            "total": 0,
+            "types_count": 0,
+            "per_type": {},
+            "active": 0,
+            "reserved": 0,
+            "free_est": 0,
+        }
+        table = Table(title="GPU status")
+        table.add_column("Category", style="bold")
+        table.add_column("Total")
+        table.add_column("Active")
+        table.add_column("Reserved")
+        table.add_column("Free est.")
+
+        table.add_row(
+            "ALL",
+            str(s.get("total", 0)),
+            str(s.get("active", 0)),
+            str(s.get("reserved", 0)),
+            str(s.get("free_est", 0)),
+        )
+        table.add_row("Types", str(s.get("types_count", 0)), "-", "-", "-")
+
+        per_type_stats = s.get("per_type_stats", {})
+        if isinstance(per_type_stats, dict):
+            for gpu_type, stats in sorted(per_type_stats.items()):
+                if not isinstance(stats, dict):
+                    continue
+                table.add_row(
+                    gpu_type,
+                    str(stats.get("total", 0)),
+                    str(stats.get("active", 0)),
+                    str(stats.get("reserved", 0)),
+                    str(stats.get("free_est", 0)),
+                )
         return table
 
 
@@ -333,8 +507,8 @@ class SummaryBar(Static):
     def render(self) -> Table:
         # Fallback structure if no data yet
         empty = {
-            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0},
-            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0},
+            "running": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
+            "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0},
         }
         s = self.summary or {
             "all": empty,
@@ -342,7 +516,7 @@ class SummaryBar(Static):
             "others": empty,
         }
 
-        table = Table(title="Job statistics (jobs / CPUs / MEM)")
+        table = Table(title="Job statistics (jobs / GPUs / CPUs / MEM)")
         table.add_column("Owner", style="bold")
         table.add_column("Running", style="green")
         table.add_column("Pending", style="yellow")
@@ -350,9 +524,10 @@ class SummaryBar(Static):
         def fmt_block(bucket: str, state: str) -> str:
             data = s.get(bucket, {}).get(state, {})
             jobs = data.get("jobs", 0)
+            gpus = data.get("gpus", 0)
             cpus = data.get("cpus", 0)
             mem_mb = data.get("mem_mb", 0)
-            return f"{jobs} / {cpus} / {_format_mb_human(mem_mb)}"
+            return f"{jobs} / {gpus} / {cpus} / {_format_mb_human(mem_mb)}"
 
         def add_row(label: str, key: str) -> None:
             running = fmt_block(key, "running")
@@ -371,29 +546,43 @@ class SlurmHtop(App):
     Screen {
         layout: vertical;
     }
-    #search {
-        display: none;
-    }
-    #search.-active {
-        display: block;
-    }
-    #main-row {
+    #main-split {
         height: 1fr;
     }
-    #jobs {
+    #left-column {
         width: 2fr;
+        height: 1fr;
+    }
+    #nodes-column {
+        width: 1fr;
+        height: 1fr;
+    }
+    #jobs-scroll {
+        height: 1fr;
+    }
+    #summary {
+        height: auto;
+    }
+    #nodes-scroll {
+        height: 2fr;
+    }
+    #gpu-scroll {
+        height: 1fr;
     }
     #nodes {
-        width: 1fr;
+        height: auto;
+    }
+    #gpu-status {
+        height: auto;
     }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
-        ("r", "refresh", "Refresh now"),
-        ("f", "toggle_only_me", "Toggle my jobs"),
-        ("slash", "focus_search", "Search jobs"),
-        ("escape", "clear_search", "Clear search"),
+        ("r", "refresh", "Ref"),
+        ("s", "toggle_sort_pick_mode", "Sort"),
+        ("d", "toggle_sort_direction", "Asc/Desc"),
+        ("f", "cycle_owner_filter", "Owner"),
     ]
 
     REFRESH_INTERVAL = 3.0  # seconds
@@ -402,23 +591,22 @@ class SlurmHtop(App):
         super().__init__(**kwargs)
         self.jobs_view = JobsView(id="jobs")
         self.nodes_view = NodesView(id="nodes")
+        self.gpu_status_view = GpuStatusView(id="gpu-status")
         self.summary_bar = SummaryBar(id="summary")
-        self.search_input = Input(
-            placeholder="Type to filter jobs... (Esc to clear)"
-            ,
-            id="search",
-        )
         self._task = None
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield self.search_input
-        with Horizontal(id="main-row"):
-            with VerticalScroll():
-                yield self.jobs_view
-            with VerticalScroll():
-                yield self.nodes_view
-        yield self.summary_bar
+        with Horizontal(id="main-split"):
+            with Vertical(id="left-column"):
+                with VerticalScroll(id="jobs-scroll"):
+                    yield self.jobs_view
+                yield self.summary_bar
+            with Vertical(id="nodes-column"):
+                with VerticalScroll(id="nodes-scroll"):
+                    yield self.nodes_view
+                with VerticalScroll(id="gpu-scroll"):
+                    yield self.gpu_status_view
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -434,30 +622,28 @@ class SlurmHtop(App):
         nodes = parse_sinfo()
         self.jobs_view.jobs = jobs
         self.nodes_view.nodes = nodes
+        self.gpu_status_view.stats = summarize_gpus(nodes, jobs)
         self.summary_bar.summary = summarize_jobs(jobs, self.jobs_view.user)
 
     async def action_refresh(self) -> None:
         await self.refresh_data()
 
-    async def action_toggle_only_me(self) -> None:
-        self.jobs_view.only_me = not self.jobs_view.only_me
+    def _set_sort_from_index(self, idx: int) -> None:
+        options = ["state", "jobid", "user", "partition", "cpus", "gpus", "mem", "time"]
+        if 0 <= idx < len(options):
+            self.jobs_view.sort_key = options[idx]
+            self.jobs_view.sort_pick_mode = False
 
-    async def action_focus_search(self) -> None:
-        self.search_input.add_class("-active")
-        self.search_input.focus()
+    async def action_toggle_sort_pick_mode(self) -> None:
+        self.jobs_view.sort_pick_mode = not self.jobs_view.sort_pick_mode
 
-    async def action_clear_search(self) -> None:
-        self.search_input.value = ""
-        self.jobs_view.search_query = ""
-        self.search_input.remove_class("-active")
+    async def action_toggle_sort_direction(self) -> None:
+        self.jobs_view.sort_desc = not self.jobs_view.sort_desc
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input is self.search_input:
-            self.jobs_view.search_query = event.value
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input is self.search_input:
-            self.search_input.remove_class("-active")
+    async def action_cycle_owner_filter(self) -> None:
+        options = ["all", "me", "others"]
+        idx = options.index(self.jobs_view.owner_filter) if self.jobs_view.owner_filter in options else 0
+        self.jobs_view.owner_filter = options[(idx + 1) % len(options)]
 
 
 if __name__ == "__main__":
