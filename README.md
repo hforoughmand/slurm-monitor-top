@@ -15,6 +15,7 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 
 - Live jobs table with interactive sort and filters
 - Live node/server table (CPU and memory totals, reserved, and free)
+- Live disk table (`df -h`) with usage, mount path, type, and size
 - Job statistics split by:
   - all users
   - your jobs
@@ -84,6 +85,9 @@ twine check dist/*
 - `d` asc/desc
 - `f` owner filter (`all`, `me`, `others`)
 - `Enter` open selected job details popup
+- `Alt+Left/Right` shrink/grow currently focused panel (tab/click to focus)
+- `0` reset panel layout
+- In GPU status panel, `Enter` opens jobs using/reserving selected GPU type
 - In job details popup:
   - `c` cancel job
   - `h` hold job
@@ -111,6 +115,12 @@ twine check dist/*
 - **GPU status (under Nodes)**
   - Cluster totals: total / active / reserved / free estimate
   - Per GPU type: total / active / reserved / free estimate
+
+- **Bottom panel (Job statistics)**
+- **Bottom row**
+  - GPU status panel
+  - Disk usage panel
+  - Job statistics panel
 
 - **Bottom panel (Job statistics)**
   - Per owner bucket: all / me / others

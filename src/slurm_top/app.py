@@ -43,6 +43,14 @@ class Node:
     gres: str
 
 
+@dataclass
+class DiskUsage:
+    usage_percent: str
+    mount: str
+    fs_type: str
+    size: str
+
+
 def run_cmd(cmd: str) -> str:
     try:
         out = subprocess.check_output(shlex.split(cmd), stderr=subprocess.DEVNULL, text=True)
@@ -141,6 +149,25 @@ def parse_sinfo() -> List[Node]:
             )
         )
     return nodes
+
+
+def parse_disks() -> List[DiskUsage]:
+    raw = run_cmd("df -h --output=pcent,target,fstype,size")
+    lines = raw.strip().splitlines()
+    disks: List[DiskUsage] = []
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        disks.append(
+            DiskUsage(
+                usage_percent=parts[0].strip(),
+                mount=parts[1].strip(),
+                fs_type=parts[2].strip(),
+                size=parts[3].strip(),
+            )
+        )
+    return disks
 
 
 def _parse_int(value: str) -> int:
@@ -378,6 +405,9 @@ class JobsView(DataTable[str]):
         return job.job_id
 
     def refresh_table(self) -> None:
+        previous_scroll_x = self.scroll_x
+        previous_scroll_y = self.scroll_y
+        previous_row = self.cursor_row if self.cursor_row is not None else 0
         selected_job_id = None
         selected = self.get_selected_job()
         if selected:
@@ -404,9 +434,17 @@ class JobsView(DataTable[str]):
             for row_idx, job in enumerate(self._display_jobs):
                 if job.job_id == selected_job_id:
                     self.move_cursor(row=row_idx)
+                    self.scroll_to(x=previous_scroll_x, y=previous_scroll_y, animate=False)
                     self._update_title()
                     return
+
+        if previous_row is not None and previous_row >= 0:
+            self.move_cursor(row=min(previous_row, len(self._display_jobs) - 1))
+            self.scroll_to(x=previous_scroll_x, y=previous_scroll_y, animate=False)
+            self._update_title()
+            return
         self.move_cursor(row=0)
+        self.scroll_to(x=previous_scroll_x, y=previous_scroll_y, animate=False)
         self._update_title()
 
     def get_selected_job(self) -> Optional[Job]:
@@ -447,10 +485,11 @@ class JobsView(DataTable[str]):
 
 
 class NodesView(Static):
+    can_focus = True
     nodes: reactive[List[Node]] = reactive([])  # type: ignore
 
     def render(self) -> Table:
-        table = Table(title="Nodes")
+        table = Table(box=None, show_edge=False, pad_edge=False)
         table.add_column("NODE", style="cyan")
         table.add_column("STATE", style="bold")
         table.add_column("CPUS(T)")
@@ -476,34 +515,82 @@ class NodesView(Static):
         return table
 
 
-class GpuStatusView(Static):
+class GpuStatusView(DataTable[str]):
+    BINDINGS = [("enter", "open_gpu_jobs", "GPU jobs")]
     stats: reactive[Dict[str, object]] = reactive({})  # type: ignore
+    jobs: reactive[List[Job]] = reactive([])  # type: ignore
+    _row_gpu_types: List[Optional[str]]
 
-    def render(self) -> Table:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._row_gpu_types = []
+
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self.add_columns("TYPE", "TOTAL", "ACTIVE", "RESERVED", "FREE")
+        self.refresh_table()
+
+    def refresh_table(self) -> None:
+        selected_gpu = self.get_selected_gpu_type()
         s = self.stats or {"total": 0, "types_count": 0, "per_type": {}, "active": 0, "reserved": 0, "free_est": 0}
-        table = Table(title="GPU status")
-        table.add_column("Category", style="bold")
-        table.add_column("Total")
-        table.add_column("Active")
-        table.add_column("Reserved")
-        table.add_column("Free est.")
-        table.add_row("ALL", str(s.get("total", 0)), str(s.get("active", 0)), str(s.get("reserved", 0)), str(s.get("free_est", 0)))
-        table.add_row("Types", str(s.get("types_count", 0)), "-", "-", "-")
+        self.clear(columns=False)
+        self._row_gpu_types = []
+        self.add_row("ALL", str(s.get("total", 0)), str(s.get("active", 0)), str(s.get("reserved", 0)), str(s.get("free_est", 0)))
+        self._row_gpu_types.append(None)
+
         per_type_stats = s.get("per_type_stats", {})
         if isinstance(per_type_stats, dict):
             for gpu_type, stats in sorted(per_type_stats.items()):
                 if isinstance(stats, dict):
-                    table.add_row(gpu_type, str(stats.get("total", 0)), str(stats.get("active", 0)), str(stats.get("reserved", 0)), str(stats.get("free_est", 0)))
+                    self.add_row(gpu_type, str(stats.get("total", 0)), str(stats.get("active", 0)), str(stats.get("reserved", 0)), str(stats.get("free_est", 0)))
+                    self._row_gpu_types.append(gpu_type)
+
+        if not self._row_gpu_types:
+            return
+        if selected_gpu:
+            for idx, gpu_type in enumerate(self._row_gpu_types):
+                if gpu_type == selected_gpu:
+                    self.move_cursor(row=idx)
+                    return
+        self.move_cursor(row=0)
+
+    def get_selected_gpu_type(self) -> Optional[str]:
+        row = self.cursor_row
+        if row is None or row < 0 or row >= len(self._row_gpu_types):
+            return None
+        return self._row_gpu_types[row]
+
+    def watch_stats(self, _old: Dict[str, object], _new: Dict[str, object]) -> None:
+        self.refresh_table()
+
+    async def action_open_gpu_jobs(self) -> None:
+        await self.app.action_open_selected_gpu_jobs()
+
+
+class DiskUsageView(Static):
+    can_focus = True
+    disks: reactive[List[DiskUsage]] = reactive([])  # type: ignore
+
+    def render(self) -> Table:
+        table = Table(box=None, show_edge=False, pad_edge=False)
+        table.add_column("USAGE")
+        table.add_column("PATH", style="cyan")
+        table.add_column("TYPE")
+        table.add_column("SPACE")
+        for d in self.disks:
+            table.add_row(d.usage_percent, d.mount, d.fs_type, d.size)
         return table
 
 
 class SummaryBar(Static):
+    can_focus = True
     summary: reactive[Dict[str, Dict[str, Dict[str, int]]]] = reactive({})  # type: ignore
 
     def render(self) -> Table:
         empty = {"running": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0}, "pending": {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0}}
         s = self.summary or {"all": empty, "me": empty, "others": empty}
-        table = Table(title="Job statistics (jobs / GPUs / CPUs / MEM)")
+        table = Table(box=None, show_edge=False, pad_edge=False)
         table.add_column("Owner", style="bold")
         table.add_column("Running", style="green")
         table.add_column("Pending", style="yellow")
@@ -681,25 +768,101 @@ class SortPickerModal(ModalScreen[None]):
         await self._apply_sort_index(event.cursor_row)
 
 
+class GpuJobsModal(ModalScreen[None]):
+    BINDINGS = [
+        ("enter", "dismiss", "Close"),
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+    ]
+
+    def __init__(self, gpu_type: str, jobs: List[Job]) -> None:
+        super().__init__()
+        self.gpu_type = gpu_type
+        self.jobs = jobs
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"GPU type: {self.gpu_type} (using + reserving jobs)", id="gpu-jobs-title")
+        yield DataTable(id="gpu-jobs-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#gpu-jobs-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_columns("MODE", "JOBID", "USER", "STATE", "PART", "NAME", "NODES", "CPUS", "GPUS", "TIME")
+        rows = []
+        for job in self.jobs:
+            per_types = _parse_gpu_per_type(job.gpus)
+            count = per_types.get(self.gpu_type, 0)
+            if count <= 0:
+                continue
+            st = job.state.upper()
+            if st.startswith("R"):
+                mode = "USING"
+            elif st.startswith("P"):
+                mode = "RESERVING"
+            else:
+                continue
+            rows.append((mode, job))
+
+        rows.sort(key=lambda item: (0 if item[0] == "USING" else 1, _job_id_sort_key(item[1].job_id)))
+        for mode, job in rows:
+            table.add_row(mode, job.job_id, job.user, job.state, job.partition, job.name, job.nodes, job.ncpus, str(_parse_gpu_count(job.gpus)), job.time_used)
+
+        if table.row_count == 0:
+            table.add_row("-", "-", "-", "-", "-", "No using/reserving jobs for this GPU type", "-", "-", "-", "-")
+        table.move_cursor(row=0)
+        self.set_focus(table)
+
+
 class SlurmHtop(App):
     TITLE = "slurm-top"
     CSS = """
     Screen { layout: vertical; }
-    #main-split { height: 1fr; }
+    #main-split { height: 3fr; }
     #left-column { width: 3fr; height: 1fr; }
     #nodes-column { width: 2fr; height: 1fr; }
+    #bottom-row { height: 1fr; }
+    #gpu-column, #disk-column, #summary-column { width: 1fr; height: 1fr; }
     #jobs-scroll { height: 1fr; }
+    #jobs-scroll, #nodes-scroll, #gpu-scroll, #disk-scroll, #summary-scroll {
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-color: $panel-darken-1;
+        scrollbar-color-hover: $panel;
+        scrollbar-color-active: $accent;
+        scrollbar-corner-color: $surface;
+        scrollbar-background: $surface;
+        scrollbar-background-hover: $surface;
+        scrollbar-background-active: $surface;
+    }
+    #jobs, #gpu-status {
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-color: $panel-darken-1;
+        scrollbar-color-hover: $panel;
+        scrollbar-color-active: $accent;
+        scrollbar-corner-color: $surface;
+        scrollbar-background: $surface;
+        scrollbar-background-hover: $surface;
+        scrollbar-background-active: $surface;
+    }
     #summary { height: auto; }
     #summary, #gpu-status {
         content-align: center middle;
     }
-    #nodes-scroll { height: 1fr; }
     #nodes { height: auto; }
-    #gpu-status { height: auto; }
+    #gpu-status, #disk-usage { height: auto; }
+    #jobs-scroll, #nodes-scroll, #gpu-scroll, #disk-scroll, #summary-scroll {
+        border: round $panel;
+        padding: 0 1;
+    }
     JobDetailsModal {
         align: center middle;
     }
     SortPickerModal {
+        align: center middle;
+    }
+    GpuJobsModal {
         align: center middle;
     }
     #job-details-body {
@@ -738,6 +901,22 @@ class SlurmHtop(App):
         height: 10;
         border: round $accent;
     }
+    #gpu-jobs-title {
+        width: 130;
+        border: round $panel;
+        padding: 0 1;
+        content-align: center middle;
+    }
+    #gpu-jobs-table {
+        width: 130;
+        height: 20;
+        border: round $accent;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-color: $panel-darken-1;
+        scrollbar-color-hover: $panel;
+        scrollbar-color-active: $accent;
+    }
     """
 
     BINDINGS = [
@@ -746,6 +925,9 @@ class SlurmHtop(App):
         ("s", "open_sort_picker", "Sort"),
         ("d", "toggle_sort_direction", "Asc/Desc"),
         ("f", "cycle_owner_filter", "Owner"),
+        ("alt+left", "shrink_focused_panel", "Pane-"),
+        ("alt+right", "grow_focused_panel", "Pane+"),
+        ("0", "reset_layout", "Reset"),
     ]
 
     REFRESH_INTERVAL = 3.0
@@ -755,8 +937,14 @@ class SlurmHtop(App):
         self.jobs_view = JobsView(id="jobs")
         self.nodes_view = NodesView(id="nodes")
         self.gpu_status_view = GpuStatusView(id="gpu-status")
+        self.disk_usage_view = DiskUsageView(id="disk-usage")
         self.summary_bar = SummaryBar(id="summary")
         self._task = None
+        self.top_row_ratio = 3
+        self.bottom_row_ratio = 1
+        self.top_left_ratio = 3
+        self.top_right_ratio = 2
+        self.bottom_ratios = [1, 1, 1]  # gpu, disk, summary
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -764,16 +952,101 @@ class SlurmHtop(App):
             with Vertical(id="left-column"):
                 with VerticalScroll(id="jobs-scroll"):
                     yield self.jobs_view
-                yield self.summary_bar
             with Vertical(id="nodes-column"):
-                with VerticalScroll(id="nodes-scroll"):
+                with VerticalScroll(id="nodes-scroll", can_focus=True):
                     yield self.nodes_view
-                yield self.gpu_status_view
+        with Horizontal(id="bottom-row"):
+            with Vertical(id="gpu-column"):
+                with VerticalScroll(id="gpu-scroll", can_focus=True):
+                    yield self.gpu_status_view
+            with Vertical(id="disk-column"):
+                with VerticalScroll(id="disk-scroll", can_focus=True):
+                    yield self.disk_usage_view
+            with Vertical(id="summary-column"):
+                with VerticalScroll(id="summary-scroll", can_focus=True):
+                    yield self.summary_bar
         yield Footer()
 
     async def on_mount(self) -> None:
         self.set_focus(self.jobs_view)
+        self._apply_layout_ratios()
+        self.query_one("#jobs-scroll", VerticalScroll).border_title = "Jobs"
+        self.query_one("#nodes-scroll", VerticalScroll).border_title = "Nodes"
+        self.query_one("#gpu-scroll", VerticalScroll).border_title = "GPU status"
+        self.query_one("#disk-scroll", VerticalScroll).border_title = "Disks"
+        self.query_one("#summary-scroll", VerticalScroll).border_title = "Job statistics (jobs / GPUs / CPUs / MEM)"
         self._task = asyncio.create_task(self.poll_loop())
+
+    def _apply_layout_ratios(self) -> None:
+        self.query_one("#main-split", Horizontal).styles.height = f"{self.top_row_ratio}fr"
+        self.query_one("#bottom-row", Horizontal).styles.height = f"{self.bottom_row_ratio}fr"
+        self.query_one("#left-column", Vertical).styles.width = f"{self.top_left_ratio}fr"
+        self.query_one("#nodes-column", Vertical).styles.width = f"{self.top_right_ratio}fr"
+        self.query_one("#gpu-column", Vertical).styles.width = f"{self.bottom_ratios[0]}fr"
+        self.query_one("#disk-column", Vertical).styles.width = f"{self.bottom_ratios[1]}fr"
+        self.query_one("#summary-column", Vertical).styles.width = f"{self.bottom_ratios[2]}fr"
+
+    def _grow_split(self, left_attr: str, right_attr: str) -> None:
+        setattr(self, left_attr, getattr(self, left_attr) + 1)
+        right = getattr(self, right_attr)
+        if right > 1:
+            setattr(self, right_attr, right - 1)
+        self._apply_layout_ratios()
+
+    def _shrink_split(self, left_attr: str, right_attr: str) -> None:
+        left = getattr(self, left_attr)
+        if left <= 1:
+            return
+        setattr(self, left_attr, left - 1)
+        setattr(self, right_attr, getattr(self, right_attr) + 1)
+        self._apply_layout_ratios()
+
+    def _focused_panel(self) -> str:
+        focused = self.focused
+        if focused is None:
+            return "jobs"
+        ids = set()
+        node = focused
+        while node is not None:
+            if node.id:
+                ids.add(node.id)
+            node = node.parent
+        if "jobs" in ids or "jobs-scroll" in ids:
+            return "jobs"
+        if "nodes" in ids or "nodes-scroll" in ids:
+            return "nodes"
+        if "gpu-status" in ids or "gpu-scroll" in ids:
+            return "gpu"
+        if "disk-usage" in ids or "disk-scroll" in ids:
+            return "disk"
+        return "summary"
+
+    def _focused_bottom_index(self) -> int:
+        panel = self._focused_panel()
+        if panel == "gpu":
+            return 0
+        if panel == "disk":
+            return 1
+        return 2
+
+    def _grow_bottom_focused(self) -> None:
+        idx = self._focused_bottom_index()
+        donors = [i for i, v in enumerate(self.bottom_ratios) if i != idx and v > 1]
+        if not donors:
+            return
+        donor = max(donors, key=lambda i: self.bottom_ratios[i])
+        self.bottom_ratios[idx] += 1
+        self.bottom_ratios[donor] -= 1
+        self._apply_layout_ratios()
+
+    def _shrink_bottom_focused(self) -> None:
+        idx = self._focused_bottom_index()
+        if self.bottom_ratios[idx] <= 1:
+            return
+        receiver = (idx + 1) % len(self.bottom_ratios)
+        self.bottom_ratios[idx] -= 1
+        self.bottom_ratios[receiver] += 1
+        self._apply_layout_ratios()
 
     async def poll_loop(self) -> None:
         while True:
@@ -783,10 +1056,14 @@ class SlurmHtop(App):
     async def refresh_data(self) -> None:
         jobs = sort_jobs(parse_squeue())
         nodes = parse_sinfo()
-        self.jobs_view.jobs = jobs
-        self.nodes_view.nodes = nodes
-        self.gpu_status_view.stats = summarize_gpus(nodes, jobs)
-        self.summary_bar.summary = summarize_jobs(jobs, self.jobs_view.user)
+        disks = parse_disks()
+        with self.batch_update():
+            self.jobs_view.jobs = jobs
+            self.nodes_view.nodes = nodes
+            self.disk_usage_view.disks = disks
+            self.gpu_status_view.jobs = jobs
+            self.gpu_status_view.stats = summarize_gpus(nodes, jobs)
+            self.summary_bar.summary = summarize_jobs(jobs, self.jobs_view.user)
 
     async def action_refresh(self) -> None:
         await self.refresh_data()
@@ -808,6 +1085,41 @@ class SlurmHtop(App):
             self.notify("No job selected")
             return
         await self.push_screen(JobDetailsModal(selected_job))
+
+    async def action_open_selected_gpu_jobs(self) -> None:
+        gpu_type = self.gpu_status_view.get_selected_gpu_type()
+        if not gpu_type:
+            self.notify("Select a GPU type row first")
+            return
+        await self.push_screen(GpuJobsModal(gpu_type, self.jobs_view.jobs))
+
+    async def action_grow_focused_panel(self) -> None:
+        panel = self._focused_panel()
+        if panel == "jobs":
+            self._grow_split("top_left_ratio", "top_right_ratio")
+            return
+        if panel == "nodes":
+            self._grow_split("top_right_ratio", "top_left_ratio")
+            return
+        self._grow_bottom_focused()
+
+    async def action_shrink_focused_panel(self) -> None:
+        panel = self._focused_panel()
+        if panel == "jobs":
+            self._shrink_split("top_left_ratio", "top_right_ratio")
+            return
+        if panel == "nodes":
+            self._shrink_split("top_right_ratio", "top_left_ratio")
+            return
+        self._shrink_bottom_focused()
+
+    async def action_reset_layout(self) -> None:
+        self.top_row_ratio = 3
+        self.bottom_row_ratio = 1
+        self.top_left_ratio = 3
+        self.top_right_ratio = 2
+        self.bottom_ratios = [1, 1, 1]
+        self._apply_layout_ratios()
 
 def main() -> None:
     SlurmHtop().run()
