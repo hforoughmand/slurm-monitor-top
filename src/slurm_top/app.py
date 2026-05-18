@@ -28,6 +28,7 @@ class Job:
     mem: str
     gpus: str
     time_used: str
+    node_list: str
 
 
 @dataclass
@@ -59,6 +60,13 @@ def run_cmd(cmd: str) -> str:
         return ""
 
 
+def run_cmd_argv(argv: List[str]) -> str:
+    try:
+        return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True)
+    except Exception:
+        return ""
+
+
 def run_cmd_checked(args: List[str]) -> tuple[bool, str]:
     try:
         completed = subprocess.run(args, check=False, text=True, capture_output=True)
@@ -78,26 +86,32 @@ def run_cmd_checked(args: List[str]) -> tuple[bool, str]:
 
 
 def parse_squeue() -> List[Job]:
-    format_str = "%i|%u|%T|%P|%j|%D|%C|%m|%b|%M"
-    raw = run_cmd(f"squeue -a -o '{format_str}'")
+    # Use --Format=tres-alloc: %b in -o/--format is a vestigial mapping to tres-per-node
+    # (not allocated GRES), so GPU type / usage counts would stay empty on modern Slurm.
+    fmt = (
+        "jobid:|,username:|,state:|,partition:|,name:|,numnodes:|,"
+        "numcpus:|,minmemory:|,tres-alloc:|,timeused:|,nodelist:"
+    )
+    raw = run_cmd_argv(["squeue", "-a", "-h", f"--Format={fmt}"])
     lines = raw.strip().splitlines()
     jobs: List[Job] = []
-    for line in lines[1:]:
-        parts = line.split("|")
-        if len(parts) != 10:
+    for line in lines:
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 11:
             continue
         jobs.append(
             Job(
-                job_id=parts[0].strip(),
-                user=parts[1].strip(),
-                state=parts[2].strip(),
-                partition=parts[3].strip(),
-                name=parts[4].strip(),
-                nodes=parts[5].strip(),
-                ncpus=parts[6].strip(),
-                mem=parts[7].strip(),
-                gpus=parts[8].strip(),
-                time_used=parts[9].strip(),
+                job_id=parts[0],
+                user=parts[1],
+                state=parts[2],
+                partition=parts[3],
+                name=parts[4],
+                nodes=parts[5],
+                ncpus=parts[6],
+                mem=parts[7],
+                gpus=parts[8],
+                time_used=parts[9],
+                node_list=parts[10],
             )
         )
     return jobs
@@ -628,6 +642,7 @@ class JobDetailsModal(ModalScreen[None]):
             f"Part     : {self.job.partition}",
             f"Name     : {self.job.name}",
             f"Nodes    : {self.job.nodes}",
+            f"Assigned : {self.job.node_list}",
             f"CPUs     : {self.job.ncpus}",
             f"GPUs     : {_parse_gpu_count(self.job.gpus)} ({self.job.gpus})",
             f"Memory   : {self.job.mem}",
@@ -847,11 +862,15 @@ class SlurmHtop(App):
         scrollbar-background-active: $surface;
     }
     #summary { height: auto; }
-    #summary, #gpu-status {
+    #summary {
         content-align: center middle;
     }
     #nodes { height: auto; }
-    #gpu-status, #disk-usage { height: auto; }
+    #disk-usage { height: auto; }
+    /* GpuStatusView is a DataTable: with height:auto a short panel clips
+       trailing rows AND collapses virtual_size, hiding GPU types with no
+       scrollbar. Fill the scroll viewport so the table scrolls its rows. */
+    #gpu-status { height: 1fr; }
     #jobs-scroll, #nodes-scroll, #gpu-scroll, #disk-scroll, #summary-scroll {
         border: round $panel;
         padding: 0 1;
@@ -953,17 +972,17 @@ class SlurmHtop(App):
                 with VerticalScroll(id="jobs-scroll"):
                     yield self.jobs_view
             with Vertical(id="nodes-column"):
-                with VerticalScroll(id="nodes-scroll", can_focus=True):
+                with VerticalScroll(id="nodes-scroll"):
                     yield self.nodes_view
         with Horizontal(id="bottom-row"):
             with Vertical(id="gpu-column"):
-                with VerticalScroll(id="gpu-scroll", can_focus=True):
+                with VerticalScroll(id="gpu-scroll"):
                     yield self.gpu_status_view
             with Vertical(id="disk-column"):
-                with VerticalScroll(id="disk-scroll", can_focus=True):
+                with VerticalScroll(id="disk-scroll"):
                     yield self.disk_usage_view
             with Vertical(id="summary-column"):
-                with VerticalScroll(id="summary-scroll", can_focus=True):
+                with VerticalScroll(id="summary-scroll"):
                     yield self.summary_bar
         yield Footer()
 
