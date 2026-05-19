@@ -1,18 +1,22 @@
 import asyncio
+import json
 import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
+from textual.coordinate import Coordinate
 from textual.events import Key
 from textual.reactive import reactive
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Static
 
 
@@ -52,9 +56,16 @@ class DiskUsage:
     size: str
 
 
+# Hard cap on every external command. Without this a stuck `df` (stale NFS
+# mount) or a slow slurmctld would block whatever thread the call runs on.
+CMD_TIMEOUT = 15
+
+
 def run_cmd(cmd: str) -> str:
     try:
-        out = subprocess.check_output(shlex.split(cmd), stderr=subprocess.DEVNULL, text=True)
+        out = subprocess.check_output(
+            shlex.split(cmd), stderr=subprocess.DEVNULL, text=True, timeout=CMD_TIMEOUT
+        )
         return out
     except Exception:
         return ""
@@ -62,14 +73,18 @@ def run_cmd(cmd: str) -> str:
 
 def run_cmd_argv(argv: List[str]) -> str:
     try:
-        return subprocess.check_output(argv, stderr=subprocess.DEVNULL, text=True)
+        return subprocess.check_output(
+            argv, stderr=subprocess.DEVNULL, text=True, timeout=CMD_TIMEOUT
+        )
     except Exception:
         return ""
 
 
 def run_cmd_checked(args: List[str]) -> tuple[bool, str]:
     try:
-        completed = subprocess.run(args, check=False, text=True, capture_output=True)
+        completed = subprocess.run(
+            args, check=False, text=True, capture_output=True, timeout=CMD_TIMEOUT
+        )
         ok = completed.returncode == 0
         stdout = (completed.stdout or "").strip()
         stderr = (completed.stderr or "").strip()
@@ -85,36 +100,157 @@ def run_cmd_checked(args: List[str]) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def parse_squeue() -> List[Job]:
-    # Use --Format=tres-alloc: %b in -o/--format is a vestigial mapping to tres-per-node
-    # (not allocated GRES), so GPU type / usage counts would stay empty on modern Slurm.
-    fmt = (
-        "jobid:|,username:|,state:|,partition:|,name:|,numnodes:|,"
-        "numcpus:|,minmemory:|,tres-alloc:|,timeused:|,nodelist:"
+def _config_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), ".config", "slurm-monitor-top")
+
+
+def _config_path() -> str:
+    return os.path.join(_config_dir(), "config.json")
+
+
+def load_config() -> Dict[str, object]:
+    """Load persisted settings from ~/.config/slurm-monitor-top/config.json."""
+    try:
+        with open(_config_path()) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_config(config: Dict[str, object]) -> None:
+    """Persist settings to ~/.config/slurm-monitor-top/config.json (best effort)."""
+    try:
+        os.makedirs(_config_dir(), exist_ok=True)
+        with open(_config_path(), "w") as fh:
+            json.dump(config, fh, indent=2)
+    except Exception:
+        pass
+
+
+# Use --Format=tres-alloc: %b in -o/--format is a vestigial mapping to tres-per-node
+# (not allocated GRES), so GPU type / usage counts would stay empty on modern Slurm.
+_SQUEUE_FORMAT = (
+    "jobid:|,username:|,state:|,partition:|,name:|,numnodes:|,"
+    "numcpus:|,minmemory:|,tres-alloc:|,timeused:|,nodelist:"
+)
+
+
+def _job_from_line(line: str) -> Optional[Job]:
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) != 11:
+        return None
+    return Job(
+        job_id=parts[0],
+        user=parts[1],
+        state=parts[2],
+        partition=parts[3],
+        name=parts[4],
+        nodes=parts[5],
+        ncpus=parts[6],
+        mem=parts[7],
+        gpus=parts[8],
+        time_used=parts[9],
+        node_list=parts[10],
     )
-    raw = run_cmd_argv(["squeue", "-a", "-h", f"--Format={fmt}"])
-    lines = raw.strip().splitlines()
+
+
+def parse_squeue() -> List[Job]:
+    raw = run_cmd_argv(["squeue", "-a", "-h", f"--Format={_SQUEUE_FORMAT}"])
     jobs: List[Job] = []
-    for line in lines:
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) != 11:
-            continue
-        jobs.append(
-            Job(
-                job_id=parts[0],
-                user=parts[1],
-                state=parts[2],
-                partition=parts[3],
-                name=parts[4],
-                nodes=parts[5],
-                ncpus=parts[6],
-                mem=parts[7],
-                gpus=parts[8],
-                time_used=parts[9],
-                node_list=parts[10],
-            )
-        )
+    for line in raw.strip().splitlines():
+        job = _job_from_line(line)
+        if job is not None:
+            jobs.append(job)
     return jobs
+
+
+def fetch_job(job_id: str) -> Optional[Job]:
+    """Re-query squeue for a single job; returns None if it is no longer queued."""
+    raw = run_cmd_argv(["squeue", "-a", "-h", "-j", job_id, f"--Format={_SQUEUE_FORMAT}"])
+    for line in raw.strip().splitlines():
+        job = _job_from_line(line)
+        if job is not None and job.job_id == job_id:
+            return job
+    return None
+
+
+def _short_time(value: Optional[str]) -> str:
+    """Trim a Slurm timestamp (2026-05-18T14:15:43) to a compact form."""
+    v = (value or "").strip()
+    if not v or v in {"Unknown", "N/A", "(null)", "None"}:
+        return "-"
+    v = v.replace("T", " ")
+    return re.sub(r"(\d\d:\d\d):\d\d$", r"\1", v)
+
+
+def _human_mem(value: str) -> str:
+    mb = _parse_mem_to_mb(value)
+    return _format_mb_human(mb) if mb > 0 else (value or "-")
+
+
+def _tres_value(tres: str, key: str) -> str:
+    for part in (tres or "").split(","):
+        name, sep, val = part.strip().partition("=")
+        if sep and name.strip() == key:
+            return val.strip()
+    return ""
+
+
+def _parse_scontrol_kv(text: str) -> Dict[str, str]:
+    """Parse `scontrol show job` output into a key/value dict.
+
+    Splits only at whitespace that precedes a `Key=` token so values
+    containing spaces (Command, SubmitLine, ...) stay intact.
+    """
+    result: Dict[str, str] = {}
+    for token in re.split(r"\s+(?=[A-Za-z][\w/:.]*=)", text.strip()):
+        key, sep, value = token.partition("=")
+        if sep:
+            result.setdefault(key.strip(), value.strip())
+    return result
+
+
+def fetch_job_detail(job_id: str) -> Dict[str, str]:
+    """Detailed key/value fields for a job from `scontrol show job -d`."""
+    raw = run_cmd_argv(["scontrol", "show", "job", "-d", job_id])
+    if not raw.strip() or "Invalid job id" in raw:
+        return {}
+    return _parse_scontrol_kv(raw)
+
+
+def fetch_job_usage(job_id: str) -> Dict[str, str]:
+    """Live resource usage of a running job from `sstat` (best effort).
+
+    Returns the step with the largest MaxRSS; empty when sstat has no data
+    (pending job, not owned by the user, no running steps yet).
+    """
+    raw = run_cmd_argv([
+        "sstat", "-a", "-P", "-n",
+        "--format=MaxRSS,MaxVMSize,AveCPU,NTasks",
+        "-j", job_id,
+    ])
+    best: Dict[str, str] = {}
+    best_rss = -1.0
+    for line in raw.strip().splitlines():
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 4 or not cols[0]:
+            continue
+        rss = _parse_mem_to_mb(cols[0])
+        if rss > best_rss:
+            best_rss = rss
+            best = {"MaxRSS": cols[0], "MaxVMSize": cols[1], "AveCPU": cols[2], "NTasks": cols[3]}
+    return best
+
+
+def collect_job_info(job_id: str) -> tuple[Optional[Job], Dict[str, str], Dict[str, str]]:
+    """Gather squeue summary + scontrol detail + sstat usage for one job."""
+    job = fetch_job(job_id)
+    if job is None:
+        return None, {}, {}
+    detail = fetch_job_detail(job_id)
+    usage = fetch_job_usage(job_id) if job.state.upper().startswith("R") else {}
+    return job, detail, usage
 
 
 def parse_sinfo() -> List[Node]:
@@ -500,7 +636,9 @@ class JobsView(DataTable[str]):
 
 class NodesView(Static):
     can_focus = True
-    nodes: reactive[List[Node]] = reactive([])  # type: ignore
+    # layout=True: the panel height is auto; without a relayout on change the
+    # widget stays stuck at the height of the initial (empty) render.
+    nodes: reactive[List[Node]] = reactive([], layout=True)  # type: ignore
 
     def render(self) -> Table:
         table = Table(box=None, show_edge=False, pad_edge=False)
@@ -584,7 +722,8 @@ class GpuStatusView(DataTable[str]):
 
 class DiskUsageView(Static):
     can_focus = True
-    disks: reactive[List[DiskUsage]] = reactive([])  # type: ignore
+    # layout=True: see NodesView — auto-height panel needs a relayout on change.
+    disks: reactive[List[DiskUsage]] = reactive([], layout=True)  # type: ignore
 
     def render(self) -> Table:
         table = Table(box=None, show_edge=False, pad_edge=False)
@@ -628,44 +767,218 @@ class JobDetailsModal(ModalScreen[None]):
         ("h", "hold_job", "Hold"),
         ("u", "release_job", "Release"),
         ("r", "requeue_job", "Requeue"),
+        ("f", "manual_refresh", "Refresh"),
+        ("a", "toggle_auto_update", "Auto-update"),
     ]
+
+    AUTO_UPDATE_INTERVAL = 3.0
+    # Column index of the auto-update toggle in the #job-actions row.
+    _AUTO_COLUMN = 5
 
     def __init__(self, job: Job) -> None:
         super().__init__()
         self.job = job
+        self.detail: Dict[str, str] = {}
+        self.usage: Dict[str, str] = {}
+        self.auto_update = bool(load_config().get("job_details_auto_update", False))
+        self._auto_timer: Optional[Timer] = None
+
+    _EMPTY_FIELDS = {"", "(null)", "N/A", "None", "Unknown"}
+
+    @staticmethod
+    def _state_style(state: str) -> str:
+        s = state.upper()
+        if s.startswith("R"):
+            return "bold green"
+        if s.startswith("P"):
+            return "bold yellow"
+        if s.startswith(("CA", "F", "TO", "NF", "OOM", "DL", "BF")):
+            return "bold red"
+        if s.startswith("C"):
+            return "bold cyan"
+        return "bold"
+
+    def _field(self, key: str, default: str = "-") -> str:
+        value = (self.detail.get(key) or "").strip()
+        return default if value in self._EMPTY_FIELDS else value
+
+    def _main_text(self) -> Text:
+        """The compact key/value block (everything except WkDir / Cmd)."""
+        j = self.job
+        u = self.usage
+        gd = self._field
+        dim = "dim"
+
+        state = gd("JobState", j.state)
+        kind = "alloc" if state.upper().startswith("R") else "req"
+
+        tres = ""
+        for key in ("AllocTRES", "TRES", "ReqTRES"):
+            cand = (self.detail.get(key) or "").strip()
+            if cand and cand not in self._EMPTY_FIELDS:
+                tres = cand
+                break
+
+        mem = _tres_value(tres, "mem") or gd("MinMemoryNode", j.mem)
+        nodelist = gd("NodeList", j.node_list or "-")
+        gpu_count = _parse_gpu_count(j.gpus)
+
+        rows = [
+            Text.assemble(
+                ("Job ", dim), (j.job_id, "bold"),
+                "    ", (state, self._state_style(state)),
+                "    ", ("Reason ", dim), gd("Reason"),
+            ),
+            Text.assemble(("Name   ", dim), gd("JobName", j.name)),
+            Text.assemble(
+                ("User   ", dim), gd("UserId", j.user),
+                "    ", ("Account ", dim), gd("Account"),
+                "    ", ("QOS ", dim), gd("QOS"),
+                "    ", ("Prio ", dim), gd("Priority"),
+            ),
+            Text.assemble(
+                ("Part   ", dim), gd("Partition", j.partition),
+                "    ", ("Nodes ", dim), f"{gd('NumNodes', j.nodes)} [{nodelist}]",
+                "    ", ("Batch ", dim), gd("BatchHost"),
+            ),
+            Text.assemble(
+                ("Time   ", dim), ("run ", dim), gd("RunTime", j.time_used),
+                "    ", ("limit ", dim), gd("TimeLimit"),
+            ),
+            Text.assemble(
+                ("Sched  ", dim),
+                ("submit ", dim), _short_time(self.detail.get("SubmitTime")),
+                "    ", ("start ", dim), _short_time(self.detail.get("StartTime")),
+            ),
+            Text.assemble(
+                ("CPUs   ", dim), f"{gd('NumCPUs', j.ncpus)} ", (kind, dim),
+                "    ", ("per-task ", dim), gd("CPUs/Task"),
+                "    ", ("tasks ", dim), gd("NumTasks"),
+            ),
+            Text.assemble(
+                ("Memory ", dim), _human_mem(mem), " ", (f"({kind})", dim)
+            ),
+        ]
+        if gpu_count:
+            rows.append(Text.assemble(
+                ("GPUs   ", dim), str(gpu_count), "  ", (f"({j.gpus})", dim)
+            ))
+        if u.get("MaxRSS"):
+            rows.append(Text.assemble(
+                ("Usage  ", dim), ("MaxRSS ", dim), _human_mem(u.get("MaxRSS", "")),
+                "    ", ("MaxVM ", dim), _human_mem(u.get("MaxVMSize", "")),
+                "    ", ("AveCPU ", dim), u.get("AveCPU") or "-",
+                ("   sstat live", dim),
+            ))
+        if tres:
+            rows.append(Text.assemble(("TRES   ", dim), tres))
+        return Text("\n").join(rows)
+
+    def _paths_text(self) -> Text:
+        """WkDir + Cmd: the two long lines, shown in one shared scroller."""
+        # srun --wrap jobs leave Command empty; fall back to the submit line.
+        command = self._field("Command")
+        if command == "-":
+            command = self._field("SubmitLine")
+        return Text("\n").join([
+            Text.assemble(("WkDir  ", "dim"), self._field("WorkDir")),
+            Text.assemble(("Cmd    ", "dim"), command),
+        ])
+
+    def _auto_label(self) -> str:
+        return f"a Auto-update: {'ON' if self.auto_update else 'OFF'}"
 
     def compose(self) -> ComposeResult:
-        details = [
-            f"Job ID   : {self.job.job_id}",
-            f"User     : {self.job.user}",
-            f"State    : {self.job.state}",
-            f"Part     : {self.job.partition}",
-            f"Name     : {self.job.name}",
-            f"Nodes    : {self.job.nodes}",
-            f"Assigned : {self.job.node_list}",
-            f"CPUs     : {self.job.ncpus}",
-            f"GPUs     : {_parse_gpu_count(self.job.gpus)} ({self.job.gpus})",
-            f"Memory   : {self.job.mem}",
-            f"Run Time : {self.job.time_used}",
-        ]
-        yield Static("\n".join(details), id="job-details-body")
+        # The compact block never scrolls; WkDir + Cmd share one horizontal
+        # scroller so a single scrollbar covers just those two long lines.
+        with Vertical(id="job-details-box"):
+            yield Static(self._main_text(), id="job-details-body")
+            with HorizontalScroll(id="job-paths-scroll"):
+                yield Static(self._paths_text(), id="job-paths")
         yield DataTable(id="job-actions")
-        yield Static("Status: waiting for action", id="job-details-status")
+        yield Static(
+            f"Status: auto-update {'ON' if self.auto_update else 'OFF'}",
+            id="job-details-status",
+        )
 
     def on_mount(self) -> None:
         actions = self.query_one("#job-actions", DataTable)
         actions.cursor_type = "cell"
         actions.zebra_stripes = False
         actions.show_header = False
-        actions.add_columns("", "", "", "", "")
-        actions.add_row("c Cancel", "h Hold", "u Release", "r Requeue", "Enter/Esc/q Close")
+        actions.add_columns("", "", "", "", "", "", "")
+        actions.add_row(
+            "c Cancel", "h Hold", "u Release", "r Requeue",
+            "f Refresh", self._auto_label(), "Enter/Esc/q Close",
+        )
         actions.cursor_background_priority = "css"
         actions.cursor_foreground_priority = "css"
-        actions.move_cursor(row=0, column=4)
+        actions.move_cursor(row=0, column=6)
         self.set_focus(actions)
+        self.query_one("#job-details-box", Vertical).border_title = "Job details"
+        # Auto-update timer is Textual-managed (stopped on unmount); start it
+        # paused unless the persisted setting has auto-update on.
+        self._auto_timer = self.set_interval(
+            self.AUTO_UPDATE_INTERVAL, self._auto_tick, pause=not self.auto_update
+        )
+        # squeue gave only a summary; pull full detail right away.
+        self._request_refresh("opened")
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#job-details-status", Static).update(text)
+
+    def _refresh_body(self) -> None:
+        self.query_one("#job-details-body", Static).update(self._main_text())
+        self.query_one("#job-paths", Static).update(self._paths_text())
+
+    def _request_refresh(self, source: str) -> None:
+        # Runs as a Textual worker: cancelled automatically when the modal
+        # closes, and exclusive so refreshes never pile up.
+        self.run_worker(
+            self._do_refresh(source), group="job-detail-refresh", exclusive=True
+        )
+
+    def _auto_tick(self) -> None:
+        self._request_refresh("auto")
+
+    async def _do_refresh(self, source: str) -> None:
+        job, detail, usage = await asyncio.to_thread(collect_job_info, self.job.job_id)
+        if not self.is_mounted:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        if job is None:
+            self._set_status(
+                f"Status: job {self.job.job_id} no longer in queue "
+                f"(finished/cancelled) - checked {stamp}"
+            )
+            return
+        self.job = job
+        self.detail = detail
+        self.usage = usage
+        self._refresh_body()
+        self._set_status(f"Status: updated ({source}) at {stamp}")
+
+    def action_manual_refresh(self) -> None:
+        self._request_refresh("manual")
+
+    def action_toggle_auto_update(self) -> None:
+        self.auto_update = not self.auto_update
+        config = load_config()
+        config["job_details_auto_update"] = self.auto_update
+        save_config(config)
+        actions = self.query_one("#job-actions", DataTable)
+        actions.update_cell_at(Coordinate(0, self._AUTO_COLUMN), self._auto_label())
+        if self._auto_timer is not None:
+            if self.auto_update:
+                self._auto_timer.resume()
+            else:
+                self._auto_timer.pause()
+        if self.auto_update:
+            self._request_refresh("auto")
+        else:
+            self._set_status("Status: auto-update OFF")
 
     async def _run_action_by_column(self, column: int) -> None:
-        self.query_one("#job-details-status", Static).update("Status: running action...")
         if column == 0:
             await self.action_cancel_job()
             return
@@ -679,11 +992,19 @@ class JobDetailsModal(ModalScreen[None]):
             await self.action_requeue_job()
             return
         if column == 4:
+            self.action_manual_refresh()
+            return
+        if column == 5:
+            self.action_toggle_auto_update()
+            return
+        if column == 6:
             self.dismiss()
             return
 
     async def _run_job_action(self, command: List[str], action_name: str) -> None:
-        ok, output = run_cmd_checked(command)
+        ok, output = await asyncio.to_thread(run_cmd_checked, command)
+        if not self.is_mounted:
+            return
         status = f"Status: {action_name} {'OK' if ok else 'FAILED'} - {output}"
         self.query_one("#job-details-status", Static).update(status)
         if ok:
@@ -884,20 +1205,41 @@ class SlurmHtop(App):
     GpuJobsModal {
         align: center middle;
     }
-    #job-details-body {
-        width: 80;
+    #job-details-box {
+        width: 96;
+        height: auto;
+        max-height: 80%;
         border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
         padding: 1 2;
         background: $surface;
     }
+    #job-details-body {
+        width: 1fr;
+        height: auto;
+    }
+    #job-paths-scroll {
+        width: 1fr;
+        height: 3;
+        overflow-y: hidden;
+        scrollbar-size-horizontal: 1;
+    }
+    #job-paths-scroll:focus {
+        background: $boost;
+    }
+    #job-paths {
+        width: auto;
+        height: 2;
+    }
     #job-details-status {
-        width: 80;
+        width: 96;
         border: round $boost;
         padding: 0 2;
         background: $surface;
     }
     #job-actions {
-        width: 80;
+        width: 96;
         height: 3;
         border: round $boost;
         background: $surface;
@@ -958,7 +1300,6 @@ class SlurmHtop(App):
         self.gpu_status_view = GpuStatusView(id="gpu-status")
         self.disk_usage_view = DiskUsageView(id="disk-usage")
         self.summary_bar = SummaryBar(id="summary")
-        self._task = None
         self.top_row_ratio = 3
         self.bottom_row_ratio = 1
         self.top_left_ratio = 3
@@ -994,7 +1335,10 @@ class SlurmHtop(App):
         self.query_one("#gpu-scroll", VerticalScroll).border_title = "GPU status"
         self.query_one("#disk-scroll", VerticalScroll).border_title = "Disks"
         self.query_one("#summary-scroll", VerticalScroll).border_title = "Job statistics (jobs / GPUs / CPUs / MEM)"
-        self._task = asyncio.create_task(self.poll_loop())
+        # Textual-managed timer (stopped automatically on shutdown) instead of a
+        # raw asyncio task; the refresh itself runs in a worker.
+        self._refresh_tick()
+        self.set_interval(self.REFRESH_INTERVAL, self._refresh_tick)
 
     def _apply_layout_ratios(self) -> None:
         self.query_one("#main-split", Horizontal).styles.height = f"{self.top_row_ratio}fr"
@@ -1067,15 +1411,25 @@ class SlurmHtop(App):
         self.bottom_ratios[receiver] += 1
         self._apply_layout_ratios()
 
-    async def poll_loop(self) -> None:
-        while True:
-            await self.refresh_data()
-            await asyncio.sleep(self.REFRESH_INTERVAL)
+    def _refresh_tick(self) -> None:
+        # exclusive: a still-running refresh is cancelled rather than piling up.
+        self.run_worker(
+            self.refresh_data(), group="cluster-refresh", exclusive=True
+        )
 
-    async def refresh_data(self) -> None:
+    @staticmethod
+    def _collect_cluster_data() -> "tuple[List[Job], List[Node], List[DiskUsage]]":
         jobs = sort_jobs(parse_squeue())
         nodes = parse_sinfo()
         disks = parse_disks()
+        return jobs, nodes, disks
+
+    async def refresh_data(self) -> None:
+        # Run the blocking squeue/sinfo/df calls off the event-loop thread so a
+        # slow or stuck command never freezes the UI (or wedges shutdown).
+        jobs, nodes, disks = await asyncio.to_thread(self._collect_cluster_data)
+        if not self.is_running:
+            return
         with self.batch_update():
             self.jobs_view.jobs = jobs
             self.nodes_view.nodes = nodes
