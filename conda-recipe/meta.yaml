@@ -1,5 +1,5 @@
 {% set name = "slurm-monitor-top" %}
-{% set version = "0.6.0" %}
+{% set version = "0.6.1" %}
 
 package:
   name: {{ name|lower }}
@@ -9,7 +9,7 @@ source:
   # Built from the PyPI sdist; on every release bump `version` and replace the
   # hash with `sha256sum dist/slurm_monitor_top-<version>.tar.gz`.
   url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/slurm_monitor_top-{{ version }}.tar.gz
-  sha256: c738c61707ea259a5cdaf826a0f937ba8de51d7fa5f6f95fdb384d27a4ba89be
+  sha256: 50d99ecc9d4740f849f2a8a622b1d57df172d5b690bb7118a4af691d30271c76
 
 build:
   noarch: python

@@ -10,11 +10,11 @@ and a VS Code extension.
 - GitHub: [hforoughmand/slurm-monitor-top](https://github.com/hforoughmand/slurm-monitor-top)
 - Issues: [github.com/hforoughmand/slurm-monitor-top/issues](https://github.com/hforoughmand/slurm-monitor-top/issues)
 
-![The slurm-top dashboard](assets/tui-overview.png)
+![The slurm-top dashboard](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-overview.png)
 
 > **About the screenshots.** Every image on this page is captured against a
 > synthetic cluster defined in
-> [`tools/screenshots/fake_cluster.py`](tools/screenshots/fake_cluster.py): the
+> [`tools/screenshots/fake_cluster.py`](https://github.com/hforoughmand/slurm-monitor-top/blob/main/tools/screenshots/fake_cluster.py): the
 > users, job names, machines, partitions and paths are invented, so no real
 > cluster or person appears anywhere.
 
@@ -40,7 +40,7 @@ and a VS Code extension.
 - Auto refresh every 3 seconds that keeps your scroll position and selection
 - Resizable panels (`Alt+←` / `Alt+→`)
 - JSON output (`slurm-top --json`) for other front ends
-- A [VS Code extension](vscode-extension/) with the same panels, in the sidebar
+- A [VS Code extension](https://github.com/hforoughmand/slurm-monitor-top/tree/main/vscode-extension) with the same panels, in the sidebar
   or a full editor tab
 
 ## Feature tour
@@ -63,7 +63,7 @@ and — for a running job you own — live `MaxRSS`, `MaxVMSize` and `AveCPU` fr
 `sstat`. The work directory and command line sit in their own scroller so long
 paths do not push the rest of the block around.
 
-![The job details popup](assets/tui-job-details.png)
+![The job details popup](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-job-details.png)
 
 The action row is not decoration: `^X` cancels and `^R` requeues the job, `h`
 holds it and `u` releases it, `f` refreshes now, `a` toggles a 3-second
@@ -83,7 +83,7 @@ says nothing about what became of them. A job that reserved 16 cores and runs
 one thread holds the other fifteen idle for days, and the only trace is the
 arithmetic nobody does. The job popup does it:
 
-![Asked for against used](assets/tui-job-usage.png)
+![Asked for against used](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-job-usage.png)
 
 Three bars, and each one is coloured by *which end of its scale is the bad one*.
 Near the time limit or the memory ceiling is red because the job is about to be
@@ -103,7 +103,7 @@ measures the use.
 is writing to. Both streams at once, one above the other, because a job that
 has gone wrong usually says so in stderr while stdout keeps printing:
 
-![stdout and stderr, tailed together](assets/tui-job-output.png)
+![stdout and stderr, tailed together](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-job-output.png)
 
 Slurm stores the paths and nothing else, so this is ordinary file reading from
 the login node: whatever `tail -f` could see, this sees. Only the last stretch
@@ -127,7 +127,7 @@ out, features, boot and `slurmd` start times — followed by the jobs Slurm
 currently places on that node. `Enter` on one of those walks straight into its
 job details.
 
-![The machine details popup](assets/tui-node-details.png)
+![The machine details popup](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-node-details.png)
 
 ### GPUs: what exists, what runs, what is merely reserved
 
@@ -140,7 +140,7 @@ many pending jobs have reserved. Allocated GPUs come from a second
 `Enter` on a GPU type lists the jobs behind those totals, tagged `USING` or
 `RESERVING`.
 
-![Jobs using and reserving one GPU type](assets/tui-gpu-jobs.png)
+![Jobs using and reserving one GPU type](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-gpu-jobs.png)
 
 ### Finding jobs
 
@@ -149,12 +149,12 @@ has to match somewhere in the row — job id, user, state, partition, name, node
 list, CPUs, memory, GRES or time — so `gpu alice` means "alice's GPU jobs". An
 empty box shows everything again.
 
-![The job search popup](assets/tui-job-search.png)
+![The job search popup](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-job-search.png)
 
 The active search stays in the panel border after the box closes, next to the
 owner filter, the sort key and the shown/total count:
 
-![A jobs panel filtered by a search term](assets/tui-search-applied.png)
+![A jobs panel filtered by a search term](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-search-applied.png)
 
 ### Pinning the jobs you are watching
 
@@ -164,7 +164,7 @@ the `P` column, and the panel border counts them. Pins live in the config file,
 so a job pinned in the terminal is already on top in the VS Code extension, and
 they survive a restart.
 
-![Two pinned jobs held at the top of the table](assets/tui-job-pin.png)
+![Two pinned jobs held at the top of the table](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-job-pin.png)
 
 ### What CPU is in that machine?
 
@@ -175,7 +175,7 @@ one-second `srun` job that prints `lscpu`. The answer — model, nominal or boos
 clock, sockets by cores by threads — is cached, shown in the machine table's
 `CPU` column, and shared with the extension.
 
-![A machine's CPU model read over ssh](assets/tui-node-cpu.png)
+![A machine's CPU model read over ssh](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-node-cpu.png)
 
 The machine popup answers it as three lines — how many, of what, at what speed:
 
@@ -196,12 +196,12 @@ governor happened to be doing when we looked.
 `f` cycles the owner filter through `all`, `me` and `others` — the fastest way
 to answer "what am I actually running?".
 
-![The jobs panel filtered to your own jobs](assets/tui-owner-filter.png)
+![The jobs panel filtered to your own jobs](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-owner-filter.png)
 
 `s` opens the sort picker (or press `1`..`8` directly), and `d` flips between
 ascending and descending.
 
-![The sort picker](assets/tui-sort-picker.png)
+![The sort picker](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-sort-picker.png)
 
 ### Copying values out of a terminal table
 
@@ -212,7 +212,7 @@ tab-separated line. Values go to the system clipboard through an OSC 52 escape,
 which works over SSH in most modern terminals; where it does not, the value is
 echoed as plain selectable text at the bottom of the popup.
 
-![The copy popup](assets/tui-copy-popup.png)
+![The copy popup](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-copy-popup.png)
 
 ### Panels that give way
 
@@ -220,31 +220,31 @@ echoed as plain selectable text at the bottom of the popup.
 layout. Widening the machine panel brings out the memory and GPU columns a
 default split has no room for:
 
-![The machine panel widened with Alt+Right](assets/tui-panel-resize.png)
+![The machine panel widened with Alt+Right](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/assets/tui-panel-resize.png)
 
 ## VS Code extension
 
-[`vscode-extension/`](vscode-extension/) ships the same dashboard for VS Code.
+[`vscode-extension/`](https://github.com/hforoughmand/slurm-monitor-top/tree/main/vscode-extension) ships the same dashboard for VS Code.
 It runs `slurm-top --json --watch` in the background, so the editor and the
 terminal UI share one collector and one parser.
 
 A compact activity-bar view, for keeping an eye on the queue while you work
 (which panels it shows is a setting, `slurmTop.sidebarSections`):
 
-![The extension's sidebar view](vscode-extension/assets/ext-sidebar.png)
+![The extension's sidebar view](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-sidebar.png)
 
 And a full editor tab laid out like the terminal UI, with sortable columns and
 allocation bars:
 
-![The extension's dashboard tab](vscode-extension/assets/ext-dashboard.png)
+![The extension's dashboard tab](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-dashboard.png)
 
 Job and machine details open as a dialog over the editor rather than as another
 tab — an overlay on the dashboard, a quick-pick popup, or a view of their own,
 whichever `slurmTop.detailsIn` says:
 
-![Machine details over the dashboard](vscode-extension/assets/ext-node-detail.png)
+![Machine details over the dashboard](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-node-detail.png)
 
-![Job details in a view of their own](vscode-extension/assets/ext-job-detail.png)
+![Job details in a view of their own](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-job-detail.png)
 
 The extension carries its own copy of the collector, so installing the Python
 package is optional for extension users.
@@ -256,7 +256,7 @@ npm install && npm run package    # produces a .vsix
 
 Install the `.vsix` with **Extensions: Install from VSIX…**, then reload the
 window. Under **Remote - SSH** install it on the remote host, where `squeue`
-lives. See [vscode-extension/README.md](vscode-extension/README.md) for
+lives. See [vscode-extension/README.md](https://github.com/hforoughmand/slurm-monitor-top/blob/main/vscode-extension/README.md) for
 settings, publishing and development notes.
 
 ## Requirements
@@ -477,9 +477,9 @@ python tools/screenshots/capture_webview.py   # the VS Code extension's webview
 ```
 
 Both drive the real code against the fake cluster in
-[`tools/screenshots/fake_cluster.py`](tools/screenshots/fake_cluster.py), which
+[`tools/screenshots/fake_cluster.py`](https://github.com/hforoughmand/slurm-monitor-top/blob/main/tools/screenshots/fake_cluster.py), which
 stands in for `squeue`, `sinfo`, `scontrol`, `sstat` and `df`. See
-[tools/screenshots/README.md](tools/screenshots/README.md) for the scene list
+[tools/screenshots/README.md](https://github.com/hforoughmand/slurm-monitor-top/blob/main/tools/screenshots/README.md) for the scene list
 and what the scripts need installed.
 
 ## Notes
