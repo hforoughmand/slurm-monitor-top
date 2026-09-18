@@ -11,12 +11,19 @@ inside the editor: live jobs, nodes, GPUs and disks, in two sizes.
 Both refresh on a timer, keep their scroll position and selection across
 refreshes, and share one background collector process.
 
+![The sidebar view](assets/ext-sidebar.png)
+
+![The dashboard tab](assets/ext-dashboard.png)
+
+> The screenshots on this page come from a synthetic cluster used for
+> documentation: the users, job names and machines are invented.
+
 ## What it shows
 
 | | |
 |---|---|
-| Jobs | id, user, state, partition, name, nodes, CPUs, GPUs, memory, elapsed time, node list. Filter by owner (all / me / others), by state, or by free text. Click a column to sort. |
-| Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, GPU types. CPU, load and memory each get a bar. |
+| Jobs | id, user, state, partition, name, nodes, CPUs, GPUs, memory, elapsed time, node list. Filter by owner (all / me / others), by state, or by free text. Click a column to sort, or the star to pin. |
+| Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, GPU types, and the CPU model. CPU, load and memory each get a bar. |
 | GPUs | per type: total, active, reserved, free. Open one to list the jobs holding it. |
 | Disks | `df -h` usage with a bar, mount point, size, used, free, filesystem type. Size columns sort by real bytes, so `2T` sorts above `176G`. |
 | Summary | running and pending jobs, GPUs, CPUs and memory, split all / me / others. |
@@ -24,6 +31,68 @@ refreshes, and share one background collector process.
 Double-click (or select and press <kbd>Enter</kbd>) a job or machine for its
 full `scontrol` details in a popup; press <kbd>c</kbd> to copy the selected row.
 <kbd>↑</kbd> and <kbd>↓</kbd> move the selection once a table has focus.
+
+## What a job asked for, and what it is using
+
+A job's details open with an **asked for vs used** block above the raw Slurm
+fields: elapsed time against the limit, CPU time against the cores the job
+holds, peak memory against the reservation. Each bar is coloured by which end
+of its scale is the bad one — a job near its memory ceiling is about to be
+killed, and a job using 6% of the cores it reserved is holding the other 94%
+idle. Both are red; a comfortable middle is not.
+
+The live half of that comes from `sstat`, which answers only for your own
+running jobs, so on someone else's job the block says so rather than showing an
+empty bar. GPUs get a line without one: Slurm accounts for the reservation and
+never measures the use.
+
+## Reading a job's output
+
+Under those bars, the **output** block gives each stream's path, size and last
+write, with **Open**. That opens the real file as an ordinary editor tab —
+searchable, and it follows the job as it writes. Two cases it cannot open
+directly, and both fall back to fetching the last 1000 lines through the
+collector: a file this machine cannot see (a remote `slurmTop.command`), and one
+too large to pull through whole.
+
+Slurm records the paths and nothing more, so what is readable is whatever the
+account running the collector could `tail` — and `scontrol` shows the paths only
+to the job's owner. A script that sent both streams to one file says so instead
+of listing the same file twice.
+
+## Pinning the jobs you are watching
+
+Click the star at the left of a job row, or press <kbd>p</kbd> with the row
+selected. Pinned jobs lead the table whatever the sort says, so the two runs you
+actually care about stay visible under a queue of two hundred.
+
+Pins are kept by the collector, in `~/.config/slurm-monitor-top/config.json`,
+not by the editor — so a job pinned here is already on top in the `slurm-top`
+terminal dashboard, and the sidebar and the dashboard tab always agree.
+
+## What CPU is in that machine?
+
+Slurm reports how many cores a node has and how they are arranged, but never
+*what* they are: there is no model name or clock anywhere in `sinfo` or
+`scontrol`. So the **CPU** column shows the layout (`2 x 64C/2T`) until someone
+asks for more.
+
+A machine's details open with a **processors** section that answers how many of
+what: logical CPUs, physical cores, sockets, cores per socket, threads per core
+and architecture — then, once the machine has been read, `2 x EPYC 7763` and
+every clock it reports.
+
+Press **Read it from the node** to fill that second half in. The collector
+connects over `ssh`, and if the node refuses — many clusters only admit you to a
+node where you already have a job — falls back to a one-second Slurm job that
+prints `lscpu`. The answer is cached and shared with the terminal UI, so each
+machine is read once, ever. Nothing is probed unless you ask.
+
+Each clock says what it is rather than being reported as "the speed": a model
+name carrying its own `@ 2.60GHz` gives the `nominal clock`, the speed the
+machine runs at, while `max clock` is a boost ceiling one core reaches and
+`clock right now` is whatever the governor was doing when we looked. Set
+`slurmTop.cpuProbeUsesSrun` to `false` to try `ssh` only.
 
 ## Details open in a floating window
 
@@ -36,6 +105,13 @@ inside a machine's details are clickable and swap the window to that job.
 
 One window is reused as you click through rows, rather than accumulating twenty
 of them.
+
+![Job details in a window of their own](assets/ext-job-detail.png)
+
+Machine details list the jobs Slurm placed on that node; their ids are
+clickable. Here they are as an `overlay`, over the dashboard that opened them:
+
+![Machine details as an overlay on the dashboard](assets/ext-node-detail.png)
 
 This needs VS Code 1.85 or later; on an older build the extension quietly opens
 an editor tab instead and says so in **Slurm: Show Extension Log**.
@@ -56,7 +132,10 @@ on its button instead, because re-filling the list while you are typing a filter
 would move the selection out from under you.
 
 **Slurm: Show Job Details…** and **Slurm: Show Node Details…** open details for
-an id you type, without going through a table.
+an id you type, without going through a table. **Slurm: Open Job Output
+(stdout/stderr)…** goes straight to a job's log; when the job wrote two files it
+asks which — **both**, stdout or stderr — and **both** opens the pair as two
+tabs.
 
 ## Requirements
 
@@ -85,6 +164,7 @@ command says so rather than failing if the package is missing.
 | `slurmTop.sidebarSections` | all five | Which sections the narrow view shows, in order. Panels there fold by clicking the header. The dashboard always shows all five. |
 | `slurmTop.detailsIn` | `"window"` | `window` for a floating window of its own, `popup` for a command-palette-style list, `card` for a centred card in a tab, `tab` for a plain editor tab, `overlay` for a panel inside the view. |
 | `slurmTop.defaultOwnerFilter` | `"me"` | Whose jobs to show on open. |
+| `slurmTop.cpuProbeUsesSrun` | `true` | When reading a machine's CPU model, fall back to a one-second Slurm job if `ssh` to that node is refused. Probes only ever run when you ask for one. |
 
 ## How it gets its data
 
@@ -99,6 +179,10 @@ which prints one JSON snapshot per line, produced by the same
 handling can only be right or wrong in one place. Details come from
 `slurm-top --json --job <id>` / `--node <name>`, one call each. One long-lived process rather
 than one spawn per tick keeps a shared login node quiet.
+
+Pinning and CPU probes go through the same command — `--toggle-pin <id>` and
+`--node <name> --probe-cpu` — rather than through editor storage, which is what
+keeps both front ends on one list of pins and one CPU cache.
 
 Collector resolution, in order: `slurmTop.command`; `<python> -m
 slurm_top.export`; `slurm-top --json` on `PATH`; the copy bundled in the
@@ -147,8 +231,13 @@ To publish so that anyone can install it from the Extensions view:
 
 ```bash
 npx @vscode/vsce login <publisher>   # needs an Azure DevOps personal access token
-npx @vscode/vsce publish             # or: publish minor / publish 0.4.2
+npm run publish-vsce                 # or: npm run publish-vsce -- minor
 ```
+
+Use the script rather than `vsce publish` directly: both it and `npm run
+package` pass `--baseContentUrl`, without which vsce resolves this README's
+relative image links against the repository root instead of this folder and the
+Marketplace listing ends up with broken images.
 
 This needs a Marketplace publisher whose id matches `publisher` in
 [package.json](package.json), currently `hforoughmand`. Create one at

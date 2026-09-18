@@ -2,7 +2,7 @@ import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import * as vscode from 'vscode';
 
 import { Collector, resolveCollector } from './resolve';
-import { JobDetail, NodeDetail, Snapshot, SUPPORTED_SCHEMA } from './types';
+import { JobDetail, JobOutput, NodeDetail, Snapshot, SUPPORTED_SCHEMA } from './types';
 
 export type ClientState = 'idle' | 'starting' | 'running' | 'error';
 
@@ -200,8 +200,13 @@ export class SlurmClient implements vscode.Disposable {
     this.snapshotEmitter.fire(parsed);
   }
 
-  /** One-shot detail lookup for the job/node popups. */
-  async fetchDetail(kind: 'job' | 'node', id: string): Promise<JobDetail | NodeDetail> {
+  /**
+   * Run the collector once and parse its single JSON object.
+   *
+   * Separate from the streaming child: these are the requests that answer a
+   * click (open this node, pin this job) and must not wait for the next tick.
+   */
+  private async runOnce(extra: string[], timeout = 30000): Promise<unknown> {
     if (!this.collector) {
       this.collector = await resolveCollector(this.extensionPath, this.log);
     }
@@ -210,16 +215,63 @@ export class SlurmClient implements vscode.Disposable {
       throw new Error('No slurm-top collector available.');
     }
     const [command, ...args] = collector.argv;
-    const argv = [...args, kind === 'job' ? '--job' : '--node', id];
+    const argv = [...args, ...extra];
     const stdout = await new Promise<string>((resolve, reject) => {
       execFile(
         command,
         argv,
-        { env: { ...process.env, ...(collector.env ?? {}) }, timeout: 30000, maxBuffer: 16 * 1024 * 1024 },
+        { env: { ...process.env, ...(collector.env ?? {}) }, timeout, maxBuffer: 16 * 1024 * 1024 },
         (err, out) => (err ? reject(err) : resolve(out))
       );
     });
-    return JSON.parse(stdout) as JobDetail | NodeDetail;
+    return JSON.parse(stdout);
+  }
+
+  /** One-shot detail lookup for the job/node popups. */
+  async fetchDetail(
+    kind: 'job' | 'node',
+    id: string,
+    options: { probeCpu?: boolean } = {}
+  ): Promise<JobDetail | NodeDetail> {
+    const extra = [kind === 'job' ? '--job' : '--node', id];
+    if (kind === 'node' && options.probeCpu) {
+      extra.push('--probe-cpu');
+      if (!vscode.workspace.getConfiguration('slurmTop').get<boolean>('cpuProbeUsesSrun', true)) {
+        extra.push('--no-srun');
+      }
+    }
+    // A probe may sit in the queue for its one-second job, so it gets longer
+    // than an ordinary lookup before we give up on it.
+    return (await this.runOnce(extra, options.probeCpu ? 90000 : 30000)) as JobDetail | NodeDetail;
+  }
+
+  /**
+   * Read the tail of one of a job's output files.
+   *
+   * Goes through the collector rather than through `vscode.workspace.fs` so it
+   * still works when the collector is a remote command: whoever can run
+   * `squeue` can read the file, and that is not always this machine.
+   */
+  async fetchJobOutput(
+    jobId: string,
+    stream: 'stdout' | 'stderr',
+    lines: number
+  ): Promise<JobOutput> {
+    return (await this.runOnce(
+      ['--job-output', jobId, '--stream', stream, '--lines', String(lines)],
+      30000
+    )) as JobOutput;
+  }
+
+  /**
+   * Flip a job's pin and return the new list.
+   *
+   * The pins live in the collector's config file rather than in the editor, so
+   * the terminal UI shows the same jobs on top.
+   */
+  async togglePin(jobId: string): Promise<string[]> {
+    const result = (await this.runOnce(['--toggle-pin', jobId], 15000)) as { pinned?: string[] };
+    return result.pinned ?? [];
   }
 
   dispose(): void {

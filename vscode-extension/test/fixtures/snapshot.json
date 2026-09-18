@@ -114,7 +114,36 @@
         "a100"
       ],
       "cpu_load_n": 12.4,
-      "cpu_load_ratio": 0.19375
+      "cpu_load_ratio": 0.19375,
+      "sockets": "2",
+      "cores_per_socket": "16",
+      "threads_per_core": "2",
+      "cpu": {
+        "sockets": 2,
+        "cores_per_socket": 16,
+        "threads_per_core": 2,
+        "topology": "2 x 16C/2T",
+        "model": "AMD EPYC 7313 16-Core Processor",
+        "model_short": "EPYC 7313",
+        "speed": "3.00GHz",
+        "speed_kind": "max",
+        "vendor": "AuthenticAMD",
+        "arch": "x86_64",
+        "summary": "EPYC 7313, max 3.00GHz",
+        "source": "ssh",
+        "probed_at": 1750000000,
+        "known": true,
+        "cpus_total": 64,
+        "cores": 32,
+        "processors": 2,
+        "count_summary": "2 x EPYC 7313",
+        "speeds": [
+          {
+            "label": "max",
+            "value": "3.00GHz"
+          }
+        ]
+      }
     },
     {
       "name": "cpu01",
@@ -146,7 +175,31 @@
       "gpu_free": 0,
       "gpu_types": [],
       "cpu_load_n": 127.1,
-      "cpu_load_ratio": 0.99296875
+      "cpu_load_ratio": 0.99296875,
+      "sockets": "2",
+      "cores_per_socket": "6",
+      "threads_per_core": "2",
+      "cpu": {
+        "sockets": 2,
+        "cores_per_socket": 6,
+        "threads_per_core": 2,
+        "topology": "2 x 6C/2T",
+        "model": "",
+        "model_short": "",
+        "speed": "",
+        "speed_kind": "",
+        "vendor": "",
+        "arch": "",
+        "summary": "",
+        "source": "",
+        "probed_at": 0,
+        "known": false,
+        "cpus_total": 24,
+        "cores": 12,
+        "processors": 2,
+        "count_summary": "",
+        "speeds": []
+      }
     },
     {
       "name": "cpu03",
@@ -178,7 +231,31 @@
       "gpu_free": 0,
       "gpu_types": [],
       "cpu_load_n": 3.9,
-      "cpu_load_ratio": 0.03046875
+      "cpu_load_ratio": 0.03046875,
+      "sockets": "1",
+      "cores_per_socket": "4",
+      "threads_per_core": "1",
+      "cpu": {
+        "sockets": 1,
+        "cores_per_socket": 4,
+        "threads_per_core": 1,
+        "topology": "1 x 4C/1T",
+        "model": "",
+        "model_short": "",
+        "speed": "",
+        "speed_kind": "",
+        "vendor": "",
+        "arch": "",
+        "summary": "",
+        "source": "",
+        "probed_at": 0,
+        "known": false,
+        "cpus_total": 4,
+        "cores": 4,
+        "processors": 1,
+        "count_summary": "",
+        "speeds": []
+      }
     }
   ],
   "disks": [
@@ -287,5 +364,8 @@
         "gpus": 0
       }
     }
-  }
+  },
+  "pinned": [
+    "1003"
+  ]
 }

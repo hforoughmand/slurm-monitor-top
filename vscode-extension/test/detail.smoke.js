@@ -65,10 +65,25 @@ const vscodeStub = {
   ViewColumn: { Active: -1, Beside: -2, One: 1 },
   ThemeIcon: class { constructor(id) { this.id = id; } },
   QuickPickItemKind: { Separator: -1 },
-  Uri: { joinPath: (base, ...parts) => ({ path: [base && base.path, ...parts].filter(Boolean).join('/') }) },
+  Uri: {
+    joinPath: (base, ...parts) => ({ path: [base && base.path, ...parts].filter(Boolean).join('/') }),
+    file: (p) => ({ scheme: 'file', path: p, fsPath: p }),
+  },
   workspace: {
     getConfiguration: () => ({ get: (key, fallback) => (key in settings ? settings[key] : fallback) }),
     onDidChangeConfiguration: () => ({ dispose() {} }),
+    // A file "exists" for this stub when `readableFiles` has its path; the
+    // openJobOutput cases below flip that to test both routes.
+    fs: {
+      stat: async (uri) => {
+        if (!readableFiles.has(uri.path)) throw new Error('ENOENT');
+        return { size: 1 };
+      },
+    },
+    openTextDocument: async (arg) => {
+      opened.push(arg);
+      return arg;
+    },
   },
   env: { clipboard: { writeText: async () => {} } },
   commands: {
@@ -79,10 +94,22 @@ const vscodeStub = {
     createWebviewPanel: makePanel,
     createQuickPick: () => ({ onDidAccept() {}, onDidTriggerButton() {}, onDidHide() {}, show() {}, dispose() {}, items: [], buttons: [] }),
     setStatusBarMessage: () => {},
+    showTextDocument: async (doc) => { shown.push(doc); },
+    showWarningMessage: async (message, ...rest) => {
+      warnings.push(message);
+      // The options object, when passed, is not one of the buttons.
+      const buttons = rest.filter((r) => typeof r === 'string');
+      return warningAnswer === undefined ? undefined : buttons.find((b) => b === warningAnswer);
+    },
     createOutputChannel: () => ({ appendLine: (l) => logLines.push(l), show: () => {}, dispose: () => {} }),
   },
 };
 const logLines = [];
+const readableFiles = new Set();
+const opened = [];
+const shown = [];
+const warnings = [];
+let warningAnswer;
 
 const originalResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
@@ -111,6 +138,82 @@ const detail = require('../out/detail.js');
 const log = vscodeStub.window.createOutputChannel();
 const context = { extensionUri: { path: '/ext' }, extensionPath: '/ext' };
 const client = { fetchDetail: async () => ({ kind: 'job', job_id: '1', job: null, detail: {}, usage: {} }) };
+
+/** The collector's answer when the file itself cannot be opened from here. */
+function outputClient(text) {
+  return {
+    fetchDetail: async () => ({ kind: 'job', job_id: '1', job: null, detail: {}, usage: {} }),
+    calls: [],
+    async fetchJobOutput(jobId, stream, lines) {
+      this.calls.push({ jobId, stream, lines });
+      return {
+        kind: 'job-output',
+        job_id: jobId,
+        streams: {},
+        output: {
+          path: '/scratch/alice/logs/1001.out', exists: true, size: 10, modified: 0,
+          error: '', stream, merged: false, text, line_count: text.split('\n').length,
+          truncated: true,
+        },
+      };
+    },
+  };
+}
+
+async function checkJobOutput() {
+  console.log('\njob output:');
+  const fresh = freshDetail();
+
+  // The file is right there: it opens as an ordinary tab, and the collector is
+  // never asked for a copy of what the editor can read itself.
+  readableFiles.add('/scratch/alice/logs/1001.out');
+  opened.length = 0;
+  shown.length = 0;
+  let client = outputClient('hello');
+  await fresh.openJobOutput(client, log, '1001', 'stdout', '/scratch/alice/logs/1001.out', 1024);
+  check('a readable file is opened as a tab', opened.length === 1 && opened[0].path === '/scratch/alice/logs/1001.out',
+    JSON.stringify(opened));
+  check('and it is shown', shown.length === 1);
+  check('a readable file costs no collector call', client.calls.length === 0, JSON.stringify(client.calls));
+
+  // The same path when this machine cannot see it -- a remote collector, or a
+  // compute-node-local scratch directory.
+  readableFiles.clear();
+  opened.length = 0;
+  client = outputClient('tail from the cluster');
+  await fresh.openJobOutput(client, log, '1001', 'stderr', '/scratch/alice/logs/1001.out', 1024);
+  check('an unreachable file falls back to the collector', client.calls.length === 1,
+    JSON.stringify(client.calls));
+  check('the fallback asks for the stream that was clicked', client.calls[0]?.stream === 'stderr');
+  check('the tail is opened as an untitled document',
+    opened.length === 1 && typeof opened[0].content === 'string' &&
+      opened[0].content.includes('tail from the cluster'),
+    JSON.stringify(opened).slice(0, 160));
+  check('the document says which file and how much of it',
+    opened[0].content.includes('/scratch/alice/logs/1001.out') && opened[0].content.includes('the file is longer'),
+    opened[0].content.split('\n')[0]);
+  check('the failure is explained in the log', logLines.some((l) => l.includes('not readable')),
+    logLines.join(' | '));
+
+  // A log too big to pull through whole: the question comes first.
+  readableFiles.add('/scratch/alice/logs/huge.out');
+  opened.length = 0;
+  warnings.length = 0;
+  warningAnswer = undefined;
+  client = outputClient('the last lines');
+  await fresh.openJobOutput(client, log, '1001', 'stdout', '/scratch/alice/logs/huge.out', 512 * 1024 * 1024);
+  check('a huge file is not opened without asking', warnings.length === 1 && opened.length === 0,
+    JSON.stringify(warnings));
+  check('the question says how big it is', warnings[0]?.includes('512.0M'), warnings[0]);
+
+  warningAnswer = 'Open the whole file';
+  opened.length = 0;
+  await fresh.openJobOutput(client, log, '1001', 'stdout', '/scratch/alice/logs/huge.out', 512 * 1024 * 1024);
+  check('answering opens the whole thing', opened.length === 1 && opened[0].path === '/scratch/alice/logs/huge.out',
+    JSON.stringify(opened));
+  warningAnswer = undefined;
+  readableFiles.clear();
+}
 
 async function main() {
   console.log('setting resolution:');
@@ -186,6 +289,8 @@ async function main() {
   check('forceTab overrides the window setting',
     panels[0].options.viewColumn === vscodeStub.ViewColumn.Beside
       && !executed.includes('workbench.action.moveEditorToNewWindow'));
+
+  await checkJobOutput();
 }
 
 main()

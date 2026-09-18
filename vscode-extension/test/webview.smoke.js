@@ -23,6 +23,37 @@ function check(label, condition, detail) {
   }
 }
 
+/**
+ * A job detail payload shaped like the collector's.
+ *
+ * The CPU figure is deliberately dreadful: a job using 6% of the cores it
+ * reserved is what the bars exist to make obvious, so the test asserts it is
+ * drawn as the dangerous end of the scale rather than as a comfortable one.
+ */
+function jobDetailPayload(job, extraDetail) {
+  return {
+    kind: 'job',
+    job_id: job.job_id,
+    job,
+    detail: Object.assign({ JobId: job.job_id, Partition: job.partition }, extraDetail || {}),
+    usage: { MaxRSS: '1G' },
+    metrics: [
+      { key: 'time', label: 'Time', kind: 'bar', percent: 5.1, risk: 'high',
+        value: '2:27:03', total: '2-00:00:00', note: '1-21:32:57 left' },
+      { key: 'cpu', label: 'CPU', kind: 'bar', percent: 6.0, risk: 'low',
+        value: '1:10:35', total: '19:36:24', note: '0.5 of 8 core(s) busy on average' },
+      { key: 'gpu', label: 'GPUs', kind: 'fact', percent: null, risk: '',
+        value: '1', total: '', note: 'held for the whole run - Slurm does not measure their use' },
+    ],
+    output: {
+      stdout: { path: '/scratch/alice/logs/1001.out', exists: true, size: 26819,
+        modified: 1789725819, error: '', stream: 'stdout', merged: false },
+      stderr: { path: '/scratch/alice/logs/1001.out', exists: true, size: 26819,
+        modified: 1789725819, error: '', stream: 'stderr', merged: true },
+    },
+  };
+}
+
 function makeWindow(variant) {
   const dom = new JSDOM(
     `<body data-variant="${variant}">
@@ -149,6 +180,53 @@ function run(variant, sections, detailsIn) {
     firstRow.dispatchEvent(new window.Event('dblclick'));
   }
 
+  // Pinned jobs must lead the table whatever the sort says, and the star must
+  // be a control of its own rather than a way to open the job.
+  if (jobsPanel) {
+    const headerText = Array.from(jobsPanel.querySelectorAll('thead th')).map((th) => th.textContent);
+    check('jobs panel has a pin column', headerText[0] === '', headerText.join(','));
+    const order = () => Array.from(jobsPanel.querySelectorAll('tbody tr')).map((tr) => tr.dataset.id);
+    check('a pinned job is listed first', order()[0] === '1003', order().join(','));
+
+    const beforeOpens = postedOf().filter((m) => m.type === 'openDetail').length;
+    const star = jobsPanel.querySelector('tbody tr td.pin');
+    check('the pinned row draws a filled star', star.className.includes('pinned'), star.className);
+    star.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('clicking the star asks the host to toggle the pin',
+      postedOf().some((m) => m.type === 'togglePin' && m.jobId === '1003'));
+    check('unpinning moves the job back into the ordinary order', order()[0] !== '1003', order().join(','));
+    check('clicking the star does not open the job',
+      postedOf().filter((m) => m.type === 'openDetail').length === beforeOpens);
+
+    // The host is the authority on pins: its answer wins over the local guess.
+    send({ type: 'pinned', pinned: ['1004'] });
+    check('a pin list from the host is applied', order()[0] === '1004', order().join(','));
+    check('pins survive a reload', ((window.eval('__state') || {}).pinned || []).join(',') === '1004');
+
+    // Reversing the sort must not drag the pinned rows to the bottom.
+    const jobIdHeader = jobsPanel.querySelectorAll('thead th')[headerText.indexOf('JOBID')];
+    jobIdHeader.dispatchEvent(new window.Event('click'));
+    jobIdHeader.dispatchEvent(new window.Event('click'));
+    check('pinned stays on top with the sort reversed', order()[0] === '1004', order().join(','));
+    send({ type: 'pinned', pinned: [] });
+  }
+
+  // The CPU column stands in for what Slurm cannot tell us.
+  if (nodesPanel) {
+    const headerText = Array.from(nodesPanel.querySelectorAll('thead th')).map((th) => th.textContent);
+    if (headerText.includes('CPU')) {
+      const cpuIndex = headerText.indexOf('CPU');
+      const cellOf = (id) =>
+        Array.from(nodesPanel.querySelectorAll('tbody tr')).find((tr) => tr.dataset.id === id)
+          .querySelectorAll('td')[cpuIndex];
+      check('a probed node shows its CPU model', cellOf('gpu01').textContent.includes('EPYC 7313'),
+        cellOf('gpu01').textContent);
+      check('an unprobed node falls back to the core layout',
+        cellOf('cpu01').textContent === '2 x 6C/2T', cellOf('cpu01').textContent);
+      check('the fallback is marked as a stand-in', cellOf('cpu01').className.includes('dim'));
+    }
+  }
+
   // Collapsing a sidebar panel must hide its body and survive as state.
   if (variant === 'sidebar' && nodesPanel) {
     const title = nodesPanel.querySelector('.panel-title');
@@ -176,12 +254,63 @@ function run(variant, sections, detailsIn) {
 
   // Detail payloads must render without throwing.
   const job = snapshot.jobs[0];
-  send({ type: 'detail', detail: { kind: 'job', job_id: job.job_id, job, detail: { JobId: job.job_id, Partition: job.partition }, usage: { MaxRSS: '1G' } } });
+  send({ type: 'detail', detail: jobDetailPayload(job) });
   check('job detail overlay opens', !doc.getElementById('overlay').classList.contains('hidden'));
   check('job detail shows scontrol fields', doc.getElementById('overlay').textContent.includes('JobId'));
 
-  send({ type: 'detail', detail: { kind: 'node', node: snapshot.nodes[0].name, detail: { NodeName: snapshot.nodes[0].name }, jobs: snapshot.jobs.slice(0, 3) } });
+  // Request against use: the bars, and the two output files under them.
+  const overlayText = () => doc.getElementById('overlay').textContent;
+  check('job detail draws the usage bars', doc.getElementById('overlay').querySelectorAll('.metrics .bar').length === 2,
+    String(doc.getElementById('overlay').querySelectorAll('.metrics .bar').length));
+  check('a wasted reservation is drawn as the dangerous end',
+    !!doc.getElementById('overlay').querySelector('.metrics .bar.high'),
+    'a job at 6% of its cores must not look healthy');
+  check('a metric with no bar still shows its number', overlayText().includes('held for the whole run'));
+  check('job detail lists the output paths', overlayText().includes('/scratch/alice/logs/1001.out'));
+  const openButton = Array.from(doc.getElementById('overlay').querySelectorAll('button'))
+    .find((b) => b.textContent === 'Open');
+  check('an existing output file offers to be opened', !!openButton);
+  if (openButton) {
+    openButton.dispatchEvent(new window.Event('click'));
+    check('opening the output reaches the host',
+      postedOf().some((m) => m.type === 'openOutput' && m.stream === 'stdout'),
+      JSON.stringify(postedOf().slice(-1)));
+  }
+  check('a stream with no file of its own says so', overlayText().includes('merged into stdout'),
+    overlayText().slice(0, 200));
+  check('and it is not offered as a second file to open',
+    Array.from(doc.getElementById('overlay').querySelectorAll('button')).filter((b) => b.textContent === 'Open')
+      .length === 1);
+
+  send({ type: 'detail', detail: { kind: 'node', node: snapshot.nodes[0].name, detail: { NodeName: snapshot.nodes[0].name }, jobs: snapshot.jobs.slice(0, 3), cpu: snapshot.nodes[1].cpu } });
   check('node detail overlay opens', doc.getElementById('overlay').textContent.includes('NodeName'));
+  check('node detail lists the processor layout',
+    doc.getElementById('overlay').textContent.includes('cores per socket'));
+  check('node detail counts the CPUs',
+    doc.getElementById('overlay').textContent.includes('logical CPUs') &&
+      doc.getElementById('overlay').textContent.includes('physical cores'));
+  const probeButton = Array.from(doc.getElementById('overlay').querySelectorAll('button'))
+    .find((b) => b.textContent.includes('Read it from the node'));
+  check('an unknown CPU offers to be read from the node', !!probeButton);
+  if (probeButton) {
+    probeButton.dispatchEvent(new window.Event('click'));
+    check('the probe request reaches the host',
+      postedOf().some((m) => m.type === 'probeCpu' && m.node === snapshot.nodes[0].name));
+    send({ type: 'cpuProbe', node: snapshot.nodes[0].name, state: 'started' });
+    check('the view says what it is waiting for',
+      doc.getElementById('status').textContent.includes('CPU'), doc.getElementById('status').textContent);
+    send({ type: 'cpuProbe', node: snapshot.nodes[0].name, state: 'done', message: 'srun: Requested nodes are busy' });
+    check('a failed probe is reported rather than silently dropped',
+      doc.getElementById('status').textContent.includes('busy'), doc.getElementById('status').textContent);
+  }
+  send({ type: 'detail', detail: { kind: 'node', node: snapshot.nodes[0].name, detail: { NodeName: snapshot.nodes[0].name }, jobs: snapshot.jobs.slice(0, 3), cpu: snapshot.nodes[0].cpu } });
+  const knownText = () => doc.getElementById('overlay').textContent;
+  check('a known CPU shows the model instead of the offer',
+    knownText().includes('EPYC 7313') && !knownText().includes('Read it from the node'));
+  check('a known CPU says how many processors of that model',
+    knownText().includes('2 x EPYC 7313'), knownText().slice(0, 200));
+  check('a boost clock is labelled as one, not as the speed',
+    knownText().includes('max clock') && !knownText().includes('clock right now'));
   const jobLink = doc.getElementById('overlay').querySelector('td.link');
   check('node detail links through to a job', !!jobLink);
   if (jobLink) {
@@ -213,7 +342,7 @@ function runDetailWindow() {
 
   send({ type: 'detailTarget', kind: 'job', id: '1001' });
   const job = snapshot.jobs[0];
-  send({ type: 'detail', detail: { kind: 'job', job_id: job.job_id, job, detail: { JobId: job.job_id, WorkDir: '/home/alice' }, usage: { MaxRSS: '1G' } } });
+  send({ type: 'detail', detail: jobDetailPayload(job, { WorkDir: '/home/alice' }) });
 
   check('renders into the page, not the overlay', doc.getElementById('overlay').classList.contains('hidden'));
   check('page is titled after the job', doc.querySelector('#root .panel-title').textContent === 'Job 1001',

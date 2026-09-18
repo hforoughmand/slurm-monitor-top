@@ -481,3 +481,110 @@ td.link:hover {
 }
 
 
+
+/* ----------------------------------------------------------- usage metrics */
+
+/* The "asked for vs used" block and the output paths under it. Laid out as a
+   table rather than the .kv grid because each row carries a bar, two numbers
+   and an explanation, and they have to line up down the column. */
+.metrics {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--vscode-editor-font-family);
+  font-size: calc(var(--vscode-font-size) - 1px);
+}
+
+.metrics td {
+  padding: 2px 8px 2px 0;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.metrics td.metric-label {
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
+
+.metrics td.with-bar {
+  width: 1%;
+  min-width: 140px;
+}
+
+/* The explanation takes every pixel the other columns do not need, which
+   pulls the bar, the percentage and the two figures together into one group
+   instead of spreading them across the width of the tab. */
+.metrics td:last-child {
+  width: 100%;
+  padding-left: 12px;
+}
+
+/* The bar is the row's own gauge, not a cell of a dense table, so it earns a
+   little more height than the one in the job list. */
+.metrics .bar {
+  width: 100%;
+  height: 10px;
+  opacity: 0.5;
+}
+
+.metrics td.numeric {
+  white-space: nowrap;
+}
+
+.metrics button {
+  margin-right: 4px;
+}
+
+/* In the output table it is the path, not the explanation, that should get
+   the slack: the buttons are a fixed pair and a truncated path helps nobody. */
+.metrics.outputs td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.metrics.outputs td:nth-child(2) {
+  width: 100%;
+}
+
+
+/* ------------------------------------------------------------------- pins */
+
+/* The star is its own click target inside the row, so it gets a pointer and
+   the least width a cell can have; the outline star stays faint until you
+   hover it, or the row is pinned. */
+thead th.unsortable {
+  cursor: default;
+}
+
+td.pin {
+  width: 1.5em;
+  max-width: 1.5em;
+  padding: 1px 2px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0.25;
+  user-select: none;
+}
+
+td.pin:hover {
+  opacity: 0.9;
+}
+
+td.pin.pinned {
+  opacity: 1;
+  color: var(--vscode-charts-yellow, #d6a72c);
+}
+
+tbody tr.selected td.pin.pinned {
+  color: inherit;
+}
+
+/* A value Slurm gave us in place of one we would have to go and read, such as
+   a node's core layout standing in for its unknown CPU model. */
+td.dim {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.error-text {
+  color: var(--vscode-charts-red, #f14c4c);
+}

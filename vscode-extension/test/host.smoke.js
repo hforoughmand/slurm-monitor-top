@@ -106,8 +106,21 @@ async function main() {
     check('node detail has jobs array', Array.isArray(detail.jobs));
   }
   if (snapshots[0].jobs.length) {
-    const detail = await client.fetchDetail('job', snapshots[0].jobs[0].job_id);
+    const jobId = snapshots[0].jobs[0].job_id;
+    const detail = await client.fetchDetail('job', jobId);
     check('job detail returns the right kind', detail.kind === 'job');
+    check('job detail carries the usage metrics', Array.isArray(detail.metrics), JSON.stringify(detail.metrics));
+    check('job detail names both output streams',
+      !!detail.output && 'stdout' in detail.output && 'stderr' in detail.output,
+      JSON.stringify(detail.output));
+
+    // The tail is a second, explicit request; a detail lookup must not carry it.
+    const output = await client.fetchJobOutput(jobId, 'stdout', 5);
+    check('job output returns the right kind', output.kind === 'job-output', JSON.stringify(output).slice(0, 120));
+    check('job output carries a tail block', typeof output.output?.text === 'string');
+    check('an unreadable output still explains itself',
+      output.output.exists || !!output.output.error,
+      'the view shows the reason rather than an empty box');
   }
 
   console.log('\nlifecycle:');

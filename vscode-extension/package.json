@@ -2,7 +2,7 @@
   "name": "slurm-monitor-top",
   "displayName": "Slurm Monitor (slurm-top)",
   "description": "htop-style live view of Slurm jobs, nodes, GPUs and disks, in the sidebar or a full editor tab.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "license": "MIT",
   "publisher": "hforoughmand",
   "icon": "media/icon.png",
@@ -89,6 +89,10 @@
       {
         "command": "slurmTop.openNodeDetails",
         "title": "Slurm: Show Node Details\u2026"
+      },
+      {
+        "command": "slurmTop.openJobOutput",
+        "title": "Slurm: Open Job Output (stdout/stderr)\u2026"
       }
     ],
     "menus": {
@@ -182,6 +186,11 @@
           ],
           "default": "window",
           "markdownDescription": "Where job and machine details open. `window` needs VS Code 1.85 or later and falls back to `tab` on older builds."
+        },
+        "slurmTop.cpuProbeUsesSrun": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When reading a machine's CPU model, fall back to a one-second Slurm job if ssh to that node is refused. Slurm reports neither the model nor the clock, so one of the two routes is the only way to get them. Turn this off to try ssh only, on clusters where submitting a probe job is unwelcome. Probes only ever run when you ask for one."
         }
       }
     }
@@ -191,7 +200,8 @@
     "compile": "npm run sync-python && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
-    "package": "npm run compile && npx @vscode/vsce package",
+    "package": "npm run compile && npx @vscode/vsce package --baseContentUrl https://github.com/hforoughmand/slurm-monitor-top/raw/HEAD/vscode-extension",
+    "publish-vsce": "npm run compile && npx @vscode/vsce publish --baseContentUrl https://github.com/hforoughmand/slurm-monitor-top/raw/HEAD/vscode-extension",
     "test": "npm run compile && node test/webview.smoke.js && node test/quickpick.smoke.js && node test/detail.smoke.js && node test/host.smoke.js"
   },
   "devDependencies": {

@@ -7,7 +7,13 @@ from typing import Dict, List, Optional
 from rich.table import Table
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
+from textual.containers import (
+    Horizontal,
+    HorizontalScroll,
+    ScrollableContainer,
+    Vertical,
+    VerticalScroll,
+)
 from textual.coordinate import Coordinate
 from textual.events import Key
 from textual.reactive import reactive
@@ -16,11 +22,14 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Input, Static
 
 from .data import (
+    OUTPUT_TAIL_LINES,
+    RISK_LOW,
     DiskUsage,
     Job,
     Node,
     _format_mb_human,
     _human_mem,
+    apply_pins,
     _job_id_sort_key,
     _job_state_rank,
     _parse_gpu_count,
@@ -32,17 +41,135 @@ from .data import (
     _tres_value,
     collect_job_info,
     collect_node_info,
+    cpu_counts,
+    cpu_speed,
+    cpu_topology,
+    describe_cpu,
+    describe_cpu_count,
+    describe_cpu_speeds,
+    fetch_job_detail,
+    job_output_paths,
+    job_usage_metrics,
     load_config,
+    load_cpu_info,
+    load_pinned_jobs,
     parse_disks,
     parse_sinfo,
     parse_squeue,
+    probe_node_cpu,
+    read_file_tail,
     run_cmd_checked,
     save_config,
+    short_cpu_model,
     sort_jobs,
     summarize_gpus,
     summarize_jobs,
+    toggle_job_pin,
 )
 
+
+
+# Usage bars. Block characters rather than a widget: these are drawn inside a
+# Rich Text block that also carries the numbers, and one string is far cheaper
+# to rebuild every three seconds than a row of widgets.
+BAR_WIDTH = 20
+# The bar is drawn as coloured background on ordinary spaces, not out of the
+# block characters (U+2588 / U+2591) the first version used. A space is a
+# space in every font: the blocks depend on one that has them, sizes them to
+# the cell and does not leave a seam between neighbours, and plenty of
+# terminal fonts fail at least one of those - the shaded block in particular
+# comes out as dithered noise or an empty box. Nothing can ask a terminal
+# which glyphs its font holds, so the only robust answer is not to need any.
+#
+# What *can* be detected is colour, so a terminal with none falls back to
+# these two, which are ASCII and therefore always drawable.
+_BAR_ASCII_FULL = "#"
+_BAR_ASCII_EMPTY = "-"
+# Background for the unfilled part: dark enough to read as "empty" on the
+# app's own surface, light enough to show where the bar ends.
+_BAR_EMPTY_STYLE = "on grey23"
+
+
+def _human_bytes(size: int) -> str:
+    """Byte counts the way a file listing shows them: 812B, 26.2K, 1.4G."""
+    value = float(size)
+    for unit in ("B", "K", "M", "G", "T"):
+        if value < 1024 or unit == "T":
+            return f"{value:.0f}{unit}" if unit == "B" else f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}T"
+
+
+def _usage_style(percent: Optional[float], risk: str) -> str:
+    """Colour for a usage figure, by which end of the scale is the bad one.
+
+    A job at 95% of its memory is about to be killed; a job at 5% of its cores
+    is wasting fifteen of them. Both deserve red, at opposite ends.
+    """
+    if percent is None:
+        return "dim"
+    if risk == RISK_LOW:
+        if percent < 25:
+            return "red"
+        if percent < 60:
+            return "yellow"
+        return "green"
+    if percent >= 90:
+        return "red"
+    if percent >= 75:
+        return "yellow"
+    return "green"
+
+
+def _usage_bar(
+    percent: Optional[float], risk: str, width: int = BAR_WIDTH, color: bool = True
+) -> Text:
+    """One metric as a band, clamped so a figure over 100% still fits the frame.
+
+    ``color`` is what the terminal told us it can do; see the note by
+    :data:`_BAR_ASCII_FULL` for why that is the one thing worth asking it.
+    """
+    style = _usage_style(percent, risk)
+    filled = 0 if percent is None else int(round(max(0.0, min(100.0, percent)) / 100.0 * width))
+    if not color:
+        return Text.assemble(
+            ("[", "dim"),
+            _BAR_ASCII_FULL * filled,
+            (_BAR_ASCII_EMPTY * (width - filled), "dim"),
+            ("]", "dim"),
+        )
+    return Text.assemble(
+        ("[", "dim"),
+        (" " * filled, f"on {style}" if style != "dim" else _BAR_EMPTY_STYLE),
+        (" " * (width - filled), _BAR_EMPTY_STYLE),
+        ("]", "dim"),
+    )
+
+
+def _usage_rows(metrics: "List[Dict[str, object]]", color: bool = True) -> "List[Text]":
+    """One line per metric: label, bar, percentage, the two numbers, the why."""
+    rows: List[Text] = []
+    for metric in metrics:
+        kind = metric.get("kind")
+        note = str(metric.get("note", ""))
+        if kind == "note":
+            rows.append(Text(note, style="dim italic"))
+            continue
+        label = f"{str(metric.get('label', '')):<7}"
+        if kind == "bar":
+            percent = float(metric.get("percent") or 0.0)
+            rows.append(Text.assemble(
+                (label, "dim"),
+                _usage_bar(percent, str(metric.get("risk", "")), color=color),
+                (f" {percent:5.1f}%  ", _usage_style(percent, str(metric.get("risk", "")))),
+                f"{metric.get('value', '')} of {metric.get('total', '')}",
+                (f"   {note}", "dim"),
+            ))
+            continue
+        rows.append(Text.assemble(
+            (label, "dim"), str(metric.get("value", "")), (f"   {note}", "dim")
+        ))
+    return rows
 
 
 class StableTable(DataTable[str]):
@@ -92,6 +219,8 @@ class JobsView(StableTable):
         ("s", "open_sort_menu", "Sort"),
         ("d", "toggle_sort_direction", "Asc/Desc"),
         ("f", "cycle_owner_filter", "Owner"),
+        ("p", "toggle_pin", "Pin"),
+        ("o", "open_output", "Output"),
         ("enter", "open_details", "Details"),
     ]
     # always_update: every poll must rebuild the table, so a job that appears
@@ -103,6 +232,9 @@ class JobsView(StableTable):
     search_filter: reactive[str] = reactive("")  # type: ignore
     sort_key: reactive[str] = reactive("state")  # type: ignore
     sort_desc: reactive[bool] = reactive(False)  # type: ignore
+    # Shared with the editor extension through the config file, so a job pinned
+    # in either front end is already on top in the other.
+    pinned: reactive[frozenset] = reactive(frozenset())  # type: ignore
     user: str = os.environ.get("USER", "")
     _display_jobs: List[Job]
 
@@ -113,7 +245,8 @@ class JobsView(StableTable):
     def on_mount(self) -> None:
         self.cursor_type = "row"
         self.zebra_stripes = True
-        self.add_columns("JOBID", "USER", "STATE", "PART", "NAME", "NODES", "CPUS", "GPUS", "MEM", "TIME")
+        self.add_columns("P", "JOBID", "USER", "STATE", "PART", "NAME", "NODES", "CPUS", "GPUS", "MEM", "TIME")
+        self.pinned = frozenset(load_pinned_jobs())
         self.refresh_table()
 
     def _update_title(self) -> None:
@@ -122,6 +255,8 @@ class JobsView(StableTable):
         if self.state_filter != "all":
             parts.append(f"state={self.state_filter}")
         parts.append(f"sort={self.sort_key} {'desc' if self.sort_desc else 'asc'}")
+        if self.pinned:
+            parts.append(f"pinned={sum(1 for j in self._display_jobs if j.job_id in self.pinned)}")
         if self.search_filter:
             parts.append(f'find="{self.search_filter}"')
         self._set_panel_title(" | ".join(parts))
@@ -185,6 +320,7 @@ class JobsView(StableTable):
             if self._include_owner(j) and self._include_state(j) and self._include_search(j)
         ]
         self._display_jobs = sorted(self._display_jobs, key=self._sort_value, reverse=self.sort_desc)
+        self._display_jobs = apply_pins(self._display_jobs, self.pinned)
         for j in self._display_jobs:
             style = None
             if j.state.upper().startswith("R"):
@@ -193,7 +329,13 @@ class JobsView(StableTable):
                 style = "yellow"
             elif j.state.upper().startswith("F"):
                 style = "red"
-            self.add_row(j.job_id, j.user, Text(j.state, style=style), j.partition, j.name, j.nodes, j.ncpus, str(_parse_gpu_count(j.gpus)), j.mem, j.time_used)
+            is_pinned = j.job_id in self.pinned
+            self.add_row(
+                Text("*" if is_pinned else "", style="bold magenta"),
+                Text(j.job_id, style="bold" if is_pinned else None),
+                j.user, Text(j.state, style=style), j.partition, j.name, j.nodes,
+                j.ncpus, str(_parse_gpu_count(j.gpus)), j.mem, j.time_used,
+            )
 
         self._update_title()
         if not self._display_jobs:
@@ -232,6 +374,19 @@ class JobsView(StableTable):
     def watch_sort_desc(self, _old: bool, _new: bool) -> None:
         self.refresh_table()
 
+    def watch_pinned(self, _old: frozenset, _new: frozenset) -> None:
+        self.refresh_table()
+
+    def action_toggle_pin(self) -> None:
+        job = self.get_selected_job()
+        if job is None:
+            return
+        pinned, is_pinned = toggle_job_pin(job.job_id)
+        self.pinned = frozenset(pinned)
+        self.app.notify(
+            f"{'Pinned' if is_pinned else 'Unpinned'} job {job.job_id}", timeout=2
+        )
+
     async def action_open_sort_menu(self) -> None:
         await self.app.action_open_sort_picker()
 
@@ -244,6 +399,9 @@ class JobsView(StableTable):
     async def action_open_details(self) -> None:
         await self.app.action_open_selected_job()
 
+    async def action_open_output(self) -> None:
+        await self.app.action_open_selected_job_output()
+
     def on_data_table_row_highlighted(self) -> None:
         self._update_title()
 
@@ -251,6 +409,10 @@ class JobsView(StableTable):
 class NodesView(StableTable):
     BINDINGS = [("enter", "open_node_details", "Node details")]
     nodes: reactive[List[Node]] = reactive([], always_update=True)  # type: ignore
+    # Probed CPU models, keyed by node name. Empty until someone asks for a
+    # node's CPU in the details modal, so the column falls back to the layout
+    # Slurm does report.
+    cpu_info: reactive[Dict[str, Dict[str, str]]] = reactive({}, always_update=True)  # type: ignore
     _display_nodes: List[Node]
 
     def __init__(self, *args, **kwargs):
@@ -262,9 +424,18 @@ class NodesView(StableTable):
         self.zebra_stripes = True
         self.add_columns(
             "NODE", "STATE", "CPUS(T)", "CPUS(alloc)", "CPUS(idle)",
-            "MEM(total)", "MEM(resv)", "MEM(free)", "GPUs(total)",
+            "MEM(total)", "MEM(resv)", "MEM(free)", "GPUs(total)", "CPU",
         )
+        self.cpu_info = load_cpu_info()
         self.refresh_table()
+
+    def _cpu_cell(self, node: Node) -> Text:
+        """The CPU model if we have read it, otherwise the layout sinfo gives."""
+        info = (self.cpu_info or {}).get(node.name) or {}
+        described = describe_cpu(info)
+        if described:
+            return Text(described)
+        return Text(cpu_topology(node) or "-", style="dim")
 
     def refresh_table(self) -> None:
         snapshot = self._view_snapshot()
@@ -286,6 +457,7 @@ class NodesView(StableTable):
                 _format_mb_human(_parse_int(n.mem_reserved)),
                 _format_mb_human(_parse_int(n.mem_free)),
                 str(sum(_parse_gpu_inventory(n.gres).values())),
+                self._cpu_cell(n),
             )
 
         self._set_panel_title(f"Nodes {len(self._display_nodes)} (Enter: details)")
@@ -307,6 +479,9 @@ class NodesView(StableTable):
         return self._display_nodes[row]
 
     def watch_nodes(self, _old: List[Node], _new: List[Node]) -> None:
+        self.refresh_table()
+
+    def watch_cpu_info(self, _old: Dict[str, Dict[str, str]], _new: Dict[str, Dict[str, str]]) -> None:
         self.refresh_table()
 
     async def action_open_node_details(self) -> None:
@@ -441,22 +616,43 @@ class SummaryBar(Static):
 
 
 class JobDetailsModal(ModalScreen[None]):
+    """One job in full, with the actions that can be taken on it.
+
+    The two actions that destroy running work - cancel and requeue - sit behind
+    a modifier; everything a bare letter does either reads something or is
+    undone by another letter next to it. `c` used to cancel, which was the worst
+    possible place for it: `c` copies in every other panel of this app, so the
+    muscle memory for "copy this row" landed on `scancel`. It copies here too
+    now, and cancelling costs a deliberate ^X.
+
+    ctrl+h, ctrl+i, ctrl+j and ctrl+m are Backspace, Tab, Enter and Return at
+    the terminal level, which is why hold and requeue do not simply gain a
+    modifier on the letter they already use.
+    """
+
     BINDINGS = [
         ("enter", "dismiss", "Close"),
         ("escape", "dismiss", "Close"),
         ("q", "dismiss", "Close"),
-        ("c", "cancel_job", "Cancel"),
+        ("ctrl+x", "cancel_job", "Cancel"),
+        ("ctrl+r", "requeue_job", "Requeue"),
         ("h", "hold_job", "Hold"),
         ("u", "release_job", "Release"),
-        ("r", "requeue_job", "Requeue"),
         ("f", "manual_refresh", "Refresh"),
+        ("r", "manual_refresh", "Refresh"),
         ("a", "toggle_auto_update", "Auto-update"),
+        ("p", "toggle_pin", "Pin"),
+        ("o", "open_output", "Output"),
         ("y", "copy_job", "Copy"),
+        ("c", "copy_job", "Copy"),
     ]
 
     AUTO_UPDATE_INTERVAL = 3.0
-    # Column index of the auto-update toggle in the #job-actions row.
+    # Column indexes of the two toggles in the #job-actions row, whose labels
+    # are rewritten in place when they flip.
     _AUTO_COLUMN = 5
+    _PIN_COLUMN = 6
+    _CLOSE_COLUMN = 9
 
     def __init__(self, job: Job) -> None:
         super().__init__()
@@ -464,6 +660,7 @@ class JobDetailsModal(ModalScreen[None]):
         self.detail: Dict[str, str] = {}
         self.usage: Dict[str, str] = {}
         self.auto_update = bool(load_config().get("job_details_auto_update", False))
+        self.is_pinned = job.job_id in set(load_pinned_jobs())
         self._auto_timer: Optional[Timer] = None
 
     _EMPTY_FIELDS = {"", "(null)", "N/A", "None", "Unknown"}
@@ -547,15 +744,26 @@ class JobDetailsModal(ModalScreen[None]):
                 ("GPUs   ", dim), str(gpu_count), "  ", (f"({j.gpus})", dim)
             ))
         if u.get("MaxRSS"):
+            # MaxRSS and the CPU time are in the bars below; this row keeps the
+            # readings they leave out rather than printing the same number twice.
             rows.append(Text.assemble(
-                ("Usage  ", dim), ("MaxRSS ", dim), _human_mem(u.get("MaxRSS", "")),
-                "    ", ("MaxVM ", dim), _human_mem(u.get("MaxVMSize", "")),
-                "    ", ("AveCPU ", dim), u.get("AveCPU") or "-",
-                ("   sstat live", dim),
+                ("Usage  ", dim), ("MaxVM ", dim), _human_mem(u.get("MaxVMSize", "")),
+                "    ", ("steps ", dim), u.get("Steps") or "1",
+                ("   live from sstat", dim),
             ))
         if tres:
             rows.append(Text.assemble(("TRES   ", dim), tres))
         return Text("\n").join(rows)
+
+    def _usage_text(self) -> Text:
+        """The request-versus-use bars: how much of the reservation is working."""
+        rows = _usage_rows(
+            job_usage_metrics(self.job, self.detail, self.usage),
+            # A monochrome terminal gets the ASCII bars instead of a band of
+            # colour it would render as an empty gap.
+            color=bool(getattr(self.app.console, "color_system", "truecolor")),
+        )
+        return Text("\n").join(rows) if rows else Text("", style="dim")
 
     def _paths_text(self) -> Text:
         """WkDir + Cmd: the two long lines, shown in one shared scroller."""
@@ -568,14 +776,24 @@ class JobDetailsModal(ModalScreen[None]):
             Text.assemble(("Cmd    ", "dim"), command),
         ])
 
+    # The two labels that change with state are padded to their longest form.
+    # A DataTable does not re-measure a column when a cell is updated, so a
+    # label that grows would simply be cut off -- and a row that is built wide
+    # (opening an already-pinned job, where "p Unpin" is two columns wider than
+    # "p Pin") overflows the table and puts a horizontal scrollbar exactly
+    # where its one row of actions was.
+    _AUTO_WIDTH = len("a Auto: OFF")
+    _PIN_WIDTH = len("p Unpin")
+
     def _auto_label(self) -> str:
-        return f"a Auto: {'ON' if self.auto_update else 'OFF'}"
+        return f"a Auto: {'ON' if self.auto_update else 'OFF'}".ljust(self._AUTO_WIDTH)
 
     def compose(self) -> ComposeResult:
         # The compact block never scrolls; WkDir + Cmd share one horizontal
         # scroller so a single scrollbar covers just those two long lines.
         with Vertical(id="job-details-box"):
             yield Static(self._main_text(), id="job-details-body")
+            yield Static(self._usage_text(), id="job-usage")
             with HorizontalScroll(id="job-paths-scroll"):
                 yield Static(self._paths_text(), id="job-paths")
         yield DataTable(id="job-actions")
@@ -589,14 +807,15 @@ class JobDetailsModal(ModalScreen[None]):
         actions.cursor_type = "cell"
         actions.zebra_stripes = False
         actions.show_header = False
-        actions.add_columns("", "", "", "", "", "", "", "")
+        actions.add_columns("", "", "", "", "", "", "", "", "", "")
         actions.add_row(
-            "c Cancel", "h Hold", "u Release", "r Requeue",
-            "f Refresh", self._auto_label(), "y Copy", "Esc Close",
+            "^X Cancel", "h Hold", "u Release", "^R Requeue",
+            "f Refresh", self._auto_label(), self._pin_label(),
+            "o Output", "y Copy", "Esc Close",
         )
         actions.cursor_background_priority = "css"
         actions.cursor_foreground_priority = "css"
-        actions.move_cursor(row=0, column=7)
+        actions.move_cursor(row=0, column=self._CLOSE_COLUMN)
         self.set_focus(actions)
         self.query_one("#job-details-box", Vertical).border_title = "Job details"
         # Auto-update timer is Textual-managed (stopped on unmount); start it
@@ -612,7 +831,19 @@ class JobDetailsModal(ModalScreen[None]):
 
     def _refresh_body(self) -> None:
         self.query_one("#job-details-body", Static).update(self._main_text())
+        self.query_one("#job-usage", Static).update(self._usage_text())
         self.query_one("#job-paths", Static).update(self._paths_text())
+
+    def _alive(self) -> bool:
+        """Whether this popup is still on screen and safe to draw into.
+
+        `is_mounted` stays true for a moment after the popup is dismissed,
+        while its widgets are already gone, so a refresh that was in flight
+        when someone pressed Escape would query a widget that no longer
+        exists. A failed worker takes the whole app down with it, so this is
+        not a cosmetic check.
+        """
+        return self.is_mounted and self in self.app.screen_stack
 
     def _request_refresh(self, source: str) -> None:
         # Runs as a Textual worker: cancelled automatically when the modal
@@ -626,7 +857,7 @@ class JobDetailsModal(ModalScreen[None]):
 
     async def _do_refresh(self, source: str) -> None:
         job, detail, usage = await asyncio.to_thread(collect_job_info, self.job.job_id)
-        if not self.is_mounted:
+        if not self._alive():
             return
         stamp = time.strftime("%H:%M:%S")
         if job is None:
@@ -643,6 +874,20 @@ class JobDetailsModal(ModalScreen[None]):
 
     def action_manual_refresh(self) -> None:
         self._request_refresh("manual")
+
+    def _pin_label(self) -> str:
+        return ("p Unpin" if self.is_pinned else "p Pin").ljust(self._PIN_WIDTH)
+
+    def action_toggle_pin(self) -> None:
+        pinned, self.is_pinned = toggle_job_pin(self.job.job_id)
+        actions = self.query_one("#job-actions", DataTable)
+        actions.update_cell_at(Coordinate(0, self._PIN_COLUMN), self._pin_label())
+        jobs_view = getattr(self.app, "jobs_view", None)
+        if jobs_view is not None:
+            jobs_view.pinned = frozenset(pinned)
+        self._set_status(
+            f"Status: job {self.job.job_id} {'pinned to the top' if self.is_pinned else 'unpinned'}"
+        )
 
     def action_toggle_auto_update(self) -> None:
         self.auto_update = not self.auto_update
@@ -681,20 +926,30 @@ class JobDetailsModal(ModalScreen[None]):
             self.action_toggle_auto_update()
             return
         if column == 6:
-            self.action_copy_job()
+            self.action_toggle_pin()
             return
         if column == 7:
+            self.action_open_output()
+            return
+        if column == 8:
+            self.action_copy_job()
+            return
+        if column == self._CLOSE_COLUMN:
             self.dismiss()
             return
 
     async def _run_job_action(self, command: List[str], action_name: str) -> None:
         ok, output = await asyncio.to_thread(run_cmd_checked, command)
-        if not self.is_mounted:
+        if not self._alive():
             return
         status = f"Status: {action_name} {'OK' if ok else 'FAILED'} - {output}"
         self.query_one("#job-details-status", Static).update(status)
         if ok:
             await self.app.refresh_data()
+
+    def action_open_output(self) -> None:
+        """Tail this job's stdout/stderr in a popup of its own."""
+        self.app.push_screen(JobOutputModal(self.job, self.detail))
 
     def action_copy_job(self) -> None:
         """Copy picker for the fields that are awkward to retype (workdir, command)."""
@@ -929,6 +1184,383 @@ class CopyModal(ModalScreen[None]):
         self.action_copy_selected()
 
 
+class JobOutputModal(ModalScreen[None]):
+    """`tail -f` for the files a job's stdout and stderr are going to.
+
+    Both at once by default, one above the other: a job that has gone wrong
+    usually says so in stderr while stdout keeps printing, and having to toggle
+    between them is exactly the moment you miss the line that mattered. Batch
+    scripts that send both streams to one file get one pane, not two copies.
+
+    Slurm stores the paths and nothing else, so this is plain file reading from
+    the login node - which is also its one limitation: a job writing to scratch
+    that is local to the compute node leaves a path nothing here can open.
+    Only the last stretch of each file is read (`read_file_tail`), so following
+    a job that has been printing for a week costs the same as following one
+    that started a minute ago.
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+        ("o", "cycle_view", "View"),
+        ("1", "view_stdout", "stdout"),
+        ("2", "view_stderr", "stderr"),
+        ("3", "view_both", "both"),
+        ("f", "manual_refresh", "Refresh"),
+        ("r", "manual_refresh", "Refresh"),
+        ("a", "toggle_follow", "Follow"),
+        ("plus", "more_lines", "More"),
+        ("minus", "fewer_lines", "Fewer"),
+        ("y", "copy_output", "Copy"),
+        ("home", "to_top", "Top"),
+        ("end", "to_bottom", "Bottom"),
+    ]
+
+    FOLLOW_INTERVAL = 2.0
+    # Both first: the view you want unless you know which stream to look in.
+    MODES = ("both", "stdout", "stderr")
+    STREAMS = ("stdout", "stderr")
+    # How much scrollback one press of + or - moves through.
+    LINE_STEPS = [50, 200, 1000, 5000]
+    # The three views are three cells of the action row, in this order, so the
+    # choice is visible rather than something you have to cycle to discover.
+    VIEW_COLUMNS = ("stdout", "stderr", "both")
+    _FOLLOW_COLUMN = 4
+
+    def __init__(self, job: Job, detail: "Optional[Dict[str, str]]" = None,
+                 mode: str = "both") -> None:
+        super().__init__()
+        self.job = job
+        self.detail: Dict[str, str] = dict(detail or {})
+        self.mode = mode if mode in self.MODES else "both"
+        self.lines = OUTPUT_TAIL_LINES
+        self.streams: Dict[str, Dict[str, object]] = {}
+        self.tails: Dict[str, Dict[str, object]] = {}
+        self.follow = bool(load_config().get("job_output_follow", True))
+        self._follow_timer: Optional[Timer] = None
+
+    # -- what is on screen -------------------------------------------------
+
+    def _merged(self) -> bool:
+        """True when the job sent both streams to the same file."""
+        return bool(self.streams.get("stderr", {}).get("merged"))
+
+    def _visible_streams(self) -> "List[str]":
+        if self._merged():
+            # One file, so one pane - a second copy of it would say nothing.
+            return ["stdout"]
+        if self.mode == "both":
+            return list(self.STREAMS)
+        return [self.mode]
+
+    def _file(self, stream: str) -> Dict[str, object]:
+        return self.streams.get(stream, {})
+
+    def _path(self, stream: str) -> str:
+        return str(self._file(stream).get("path", ""))
+
+    # -- rendering ---------------------------------------------------------
+
+    def _head_text(self) -> Text:
+        dim = "dim"
+        state = (self.detail.get("JobState", "") or self.job.state).upper()
+        rows = [Text.assemble(
+            (f"{self.job.name} ", "bold"),
+            (state, self._head_state_style(state)),
+            ("    last ", dim), f"{self.lines}", (" lines", dim),
+            ("    view ", dim), "one file (merged)" if self._merged() else self.mode,
+            ("    follow ", dim), ("ON" if self.follow else "OFF", "green" if self.follow else dim),
+        )]
+        for stream in self._visible_streams():
+            info = self._file(stream)
+            size = int(info.get("size", 0) or 0)
+            modified = float(info.get("modified", 0.0) or 0.0)
+            label = "both" if self._merged() else stream
+            rows.append(Text.assemble(
+                (f"{label:<7}", dim),
+                (str(info.get("path", "")) or "-", "cyan"),
+                ("  " + _human_bytes(size), dim) if info.get("exists") else ("", dim),
+                ("  written " + time.strftime("%H:%M:%S", time.localtime(modified)), dim)
+                if modified else ("", dim),
+            ))
+        return Text("\n").join(rows)
+
+    @staticmethod
+    def _head_state_style(state: str) -> str:
+        if state.startswith("R"):
+            return "bold green"
+        if state.startswith("P"):
+            return "bold yellow"
+        return "bold"
+
+    def _body_text(self, stream: str) -> Text:
+        info = self._file(stream)
+        tail = self.tails.get(stream, {})
+        error = str(info.get("error", "")) or str(tail.get("error", ""))
+        if error:
+            return Text(f"Nothing to show: {error}", style="yellow")
+        if not self.tails:
+            return Text("Reading...", style="dim italic")
+        text = str(tail.get("text", ""))
+        if not text.strip():
+            return Text("The file is there but still empty.", style="dim italic")
+        # no_wrap so a wide log keeps its columns; the pane scrolls sideways
+        # instead of reflowing the lines.
+        return Text(text, no_wrap=True)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="job-output-box"):
+            yield Static(self._head_text(), id="job-output-head")
+            for stream in self.STREAMS:
+                with ScrollableContainer(id=f"pane-{stream}", classes="job-output-pane"):
+                    yield Static("", id=f"body-{stream}")
+        yield DataTable(id="job-output-actions")
+        yield Static("Status: reading", id="job-output-status")
+
+    def on_mount(self) -> None:
+        for stream in self.STREAMS:
+            pane = self.query_one(f"#pane-{stream}", ScrollableContainer)
+            pane.border_title = stream
+        actions = self.query_one("#job-output-actions", DataTable)
+        actions.cursor_type = "cell"
+        actions.zebra_stripes = False
+        actions.show_header = False
+        actions.add_columns("", "", "", "", "", "", "", "")
+        actions.add_row(
+            *[self._view_cell(mode) for mode in self.VIEW_COLUMNS],
+            "f Refresh", self._follow_label(),
+            "+/- Lines", "y Copy", "Esc Close",
+        )
+        actions.cursor_background_priority = "css"
+        actions.cursor_foreground_priority = "css"
+        actions.move_cursor(row=0, column=7)
+        self.set_focus(actions)
+        self.query_one("#job-output-box", Vertical).border_title = f"Output of job {self.job.job_id}"
+        self._follow_timer = self.set_interval(
+            self.FOLLOW_INTERVAL, self._follow_tick, pause=not self.follow
+        )
+        self._redraw(keep_position=False)
+        self._request_reload("opened", resolve=not self.detail)
+
+    def _view_cell(self, mode: str) -> Text:
+        """One of the three view buttons, marked when it is the one in force.
+
+        A job that sent both streams to one file has only one view; the cells
+        stay on screen, dimmed, rather than vanishing and shifting the row.
+        """
+        hotkey = str(self.VIEW_COLUMNS.index(mode) + 1)
+        if self._merged():
+            return Text(f"{hotkey} {mode}", style="dim")
+        # Bold and underlined for the one in force, dim for the others: an
+        # attribute rather than a marker glyph, for the same reason the usage
+        # bars are drawn in colour - and it keeps every cell the same width,
+        # so switching views cannot reflow the row.
+        chosen = mode == self.mode
+        return Text(f"{hotkey} {mode}", style="bold underline" if chosen else "dim")
+
+    _FOLLOW_WIDTH = len("a Follow: OFF")
+
+    def _follow_label(self) -> str:
+        return f"a Follow: {'ON' if self.follow else 'OFF'}".ljust(self._FOLLOW_WIDTH)
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#job-output-status", Static).update(text)
+
+    def _at_bottom(self, pane: ScrollableContainer) -> bool:
+        """Whether a pane is parked at the end, i.e. following the writer."""
+        return pane.max_scroll_y <= 0 or pane.scroll_offset.y >= pane.max_scroll_y - 1
+
+    def _redraw(self, keep_position: bool) -> None:
+        visible = self._visible_streams()
+        for stream in self.STREAMS:
+            pane = self.query_one(f"#pane-{stream}", ScrollableContainer)
+            pane.display = stream in visible
+            if stream not in visible:
+                continue
+            # A new tail is only scrolled to the end when the reader was
+            # already there; someone reading further up keeps their place.
+            stick = not keep_position or self._at_bottom(pane)
+            pane.border_title = "stdout + stderr" if self._merged() else stream
+            self.query_one(f"#body-{stream}", Static).update(self._body_text(stream))
+            if stick:
+                self.call_after_refresh(pane.scroll_end, animate=False)
+        self.query_one("#job-output-head", Static).update(self._head_text())
+        actions = self.query_one("#job-output-actions", DataTable)
+        for column, mode in enumerate(self.VIEW_COLUMNS):
+            actions.update_cell_at(Coordinate(0, column), self._view_cell(mode))
+
+    # -- loading -----------------------------------------------------------
+
+    def _collect(self, resolve: bool) -> "tuple[Dict[str, Dict[str, object]], Dict[str, Dict[str, object]]]":
+        detail = fetch_job_detail(self.job.job_id) if resolve else self.detail
+        if resolve:
+            self.detail = detail
+        streams = job_output_paths(detail, self.job)
+        merged = bool(streams.get("stderr", {}).get("merged"))
+        wanted = ["stdout"] if merged else (list(self.STREAMS) if self.mode == "both" else [self.mode])
+        tails = {
+            name: read_file_tail(str(streams.get(name, {}).get("path", "")), lines=self.lines)
+            for name in wanted
+        }
+        return streams, tails
+
+    def _alive(self) -> bool:
+        """Whether this popup is still on screen and safe to draw into.
+
+        `is_mounted` stays true for a moment after the popup is dismissed,
+        while its widgets are already gone, so a refresh that was in flight
+        when someone pressed Escape would query a widget that no longer
+        exists. A failed worker takes the whole app down with it, so this is
+        not a cosmetic check.
+        """
+        return self.is_mounted and self in self.app.screen_stack
+
+    def _request_reload(self, source: str, resolve: bool = False) -> None:
+        self.run_worker(
+            self._do_reload(source, resolve), group="job-output", exclusive=True
+        )
+
+    async def _do_reload(self, source: str, resolve: bool) -> None:
+        streams, tails = await asyncio.to_thread(self._collect, resolve)
+        if not self._alive():
+            return
+        first = not self.tails
+        self.streams = streams
+        self.tails = tails
+        self._redraw(keep_position=not first)
+        stamp = time.strftime("%H:%M:%S")
+        counts = ", ".join(
+            f"{name} {int(tail.get('line_count', 0) or 0)} line(s)"
+            + ("+" if tail.get("truncated") else "")
+            for name, tail in tails.items()
+        )
+        self._set_status(f"Status: {counts or 'nothing to read'} - updated ({source}) at {stamp}")
+
+    def _follow_tick(self) -> None:
+        self._request_reload("follow")
+
+    # -- actions -----------------------------------------------------------
+
+    def action_manual_refresh(self) -> None:
+        self._request_reload("manual", resolve=True)
+
+    def action_set_view(self, mode: str) -> None:
+        """Show one stream, or both - the choice the action row offers."""
+        if self._merged():
+            self._set_status("Status: this job sends both streams to one file")
+            return
+        if mode == self.mode:
+            return
+        self.mode = mode
+        self._redraw(keep_position=False)
+        self._request_reload(f"view {self.mode}")
+
+    def action_view_stdout(self) -> None:
+        self.action_set_view("stdout")
+
+    def action_view_stderr(self) -> None:
+        self.action_set_view("stderr")
+
+    def action_view_both(self) -> None:
+        self.action_set_view("both")
+
+    def action_cycle_view(self) -> None:
+        """`o` again steps through the same three, for one-key switching."""
+        if self._merged():
+            self._set_status("Status: this job sends both streams to one file")
+            return
+        self.action_set_view(self.MODES[(self.MODES.index(self.mode) + 1) % len(self.MODES)])
+
+    def action_toggle_follow(self) -> None:
+        self.follow = not self.follow
+        config = load_config()
+        config["job_output_follow"] = self.follow
+        save_config(config)
+        actions = self.query_one("#job-output-actions", DataTable)
+        actions.update_cell_at(Coordinate(0, self._FOLLOW_COLUMN), self._follow_label())
+        if self._follow_timer is not None:
+            if self.follow:
+                self._follow_timer.resume()
+            else:
+                self._follow_timer.pause()
+        if self.follow:
+            self._request_reload("follow")
+        else:
+            self._set_status("Status: follow OFF")
+
+    def _set_lines(self, lines: int) -> None:
+        if lines == self.lines:
+            return
+        self.lines = lines
+        self._request_reload(f"{lines} lines")
+
+    def action_more_lines(self) -> None:
+        bigger = [n for n in self.LINE_STEPS if n > self.lines]
+        self._set_lines(bigger[0] if bigger else self.lines)
+
+    def action_fewer_lines(self) -> None:
+        smaller = [n for n in self.LINE_STEPS if n < self.lines]
+        self._set_lines(smaller[-1] if smaller else self.lines)
+
+    def _focused_pane(self) -> ScrollableContainer:
+        visible = self._visible_streams()
+        for stream in visible:
+            pane = self.query_one(f"#pane-{stream}", ScrollableContainer)
+            if self.focused is pane:
+                return pane
+        return self.query_one(f"#pane-{visible[0]}", ScrollableContainer)
+
+    def action_to_top(self) -> None:
+        self._focused_pane().scroll_home(animate=False)
+
+    def action_to_bottom(self) -> None:
+        self._focused_pane().scroll_end(animate=False)
+
+    def action_copy_output(self) -> None:
+        fields: List[tuple[str, str]] = []
+        for stream in self.STREAMS:
+            path = self._path(stream)
+            fields.append((f"{stream.upper()} PATH", path or "-"))
+        first = self._visible_streams()[0]
+        fields.append(("TAIL COMMAND", f"tail -f {self._path(first)}" if self._path(first) else "-"))
+        for stream in self._visible_streams():
+            fields.append((
+                f"{stream.upper()} TEXT",
+                str(self.tails.get(stream, {}).get("text", "")) or "-",
+            ))
+        self.app.push_screen(CopyModal(f"output of job {self.job.job_id}", fields))
+
+    async def _run_action_by_column(self, column: int) -> None:
+        if column < len(self.VIEW_COLUMNS):
+            self.action_set_view(self.VIEW_COLUMNS[column])
+        elif column == 3:
+            self.action_manual_refresh()
+        elif column == self._FOLLOW_COLUMN:
+            self.action_toggle_follow()
+        elif column == 5:
+            self.action_more_lines()
+        elif column == 6:
+            self.action_copy_output()
+        elif column == 7:
+            self.dismiss()
+
+    async def on_key(self, event: Key) -> None:
+        if event.key != "enter":
+            return
+        actions = self.query_one("#job-output-actions", DataTable)
+        if self.focused is not actions:
+            return
+        event.stop()
+        if actions.cursor_column is not None:
+            await self._run_action_by_column(actions.cursor_column)
+
+    async def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        if event.data_table.id != "job-output-actions":
+            return
+        await self._run_action_by_column(event.coordinate.column)
+
+
 class JobSearchModal(ModalScreen[None]):
     """Free-text filter over the jobs table, applied live as you type."""
 
@@ -973,6 +1605,7 @@ class NodeDetailsModal(ModalScreen[None]):
         ("escape", "dismiss", "Close"),
         ("q", "dismiss", "Close"),
         ("f", "manual_refresh", "Refresh"),
+        ("p", "probe_cpu", "Read CPU"),
         ("c", "copy_node", "Copy"),
     ]
 
@@ -983,6 +1616,9 @@ class NodeDetailsModal(ModalScreen[None]):
         self.node = node
         self.detail: Dict[str, str] = {}
         self.node_jobs: List[Job] = []
+        self.cpu: Dict[str, str] = load_cpu_info().get(node.name, {})
+        self.cpu_error = ""
+        self.probing = False
 
     @staticmethod
     def _state_style(state: str) -> str:
@@ -1018,6 +1654,7 @@ class NodeDetailsModal(ModalScreen[None]):
                 "    ", ("idle ", dim), n.cpus_idle or "-",
                 "    ", ("load ", dim), gd("CPULoad"),
             ),
+            self._cpu_text(),
             Text.assemble(
                 ("Memory ", dim), f"{_human_mem(gd('AllocMem'))} alloc / {_human_mem(gd('RealMemory', n.mem_total))} total",
                 "    ", ("free ", dim), _human_mem(gd("FreeMem", n.mem_free)),
@@ -1027,11 +1664,13 @@ class NodeDetailsModal(ModalScreen[None]):
                 ("GRES   ", dim), gd("Gres", n.gres or "-"),
                 "    ", ("used ", dim), gd("GresUsed"),
             ),
+            # Sockets and threads used to live here; the CPU row above spells
+            # out the whole layout, so repeating two thirds of it only crowds
+            # the line the partition list needs.
             Text.assemble(
                 ("Part   ", dim), gd("Partitions"),
                 "    ", ("weight ", dim), gd("Weight"),
-                "    ", ("sockets ", dim), gd("Sockets"),
-                "    ", ("threads ", dim), gd("ThreadsPerCore"),
+                "    ", ("boards ", dim), gd("Boards"),
             ),
             Text.assemble(
                 ("Feat   ", dim), gd("AvailableFeatures"),
@@ -1052,6 +1691,65 @@ class NodeDetailsModal(ModalScreen[None]):
         if alloc_tres != "-":
             rows.append(Text.assemble(("TRES   ", dim), alloc_tres))
         return Text("\n").join(rows)
+
+    def _cpu_counts(self) -> Dict[str, int]:
+        n = self.node
+        # sinfo's %z is the fallback: the modal paints once before the
+        # scontrol lookup it fires on open has come back.
+        return cpu_counts(
+            self._field("Sockets", n.sockets),
+            self._field("CoresPerSocket", n.cores_per_socket),
+            self._field("ThreadsPerCore", n.threads_per_core),
+            self._field("CPUTot", n.cpus_total),
+        )
+
+    def _cpu_text(self) -> Text:
+        """How many processors of what, at what speed.
+
+        Slurm answers the first half on every refresh - sockets, cores, threads
+        - but carries no model name and no clock at all. Those exist only on
+        the node, so the second half stays an invitation to go and read them
+        until someone presses p.
+        """
+        dim = "dim"
+        gd = self._field
+        counts = self._cpu_counts()
+        layout = (
+            f"{counts['processors']} sockets x {counts['cores_per_processor']} cores"
+            f" x {counts['threads_per_core']} threads"
+        )
+
+        parts = [
+            ("CPU    ", dim), (f"{counts['logical']} CPUs", "bold"),
+            "    ", (f"{counts['cores']} cores" if counts["cores"] else "", dim),
+            "    ", layout,
+            "    ", ("arch ", dim), gd("Arch"),
+        ]
+        if self.probing:
+            parts += ["\n", ("Model  ", dim), ("reading the node...", "italic")]
+        elif self.cpu:
+            source = self.cpu.get("source", "")
+            parts += [
+                "\n", ("Model  ", dim),
+                (describe_cpu_count(counts, self.cpu) or "-", "bold"),
+                "    ", (f"{counts['cores_per_processor']} cores each" if counts["cores_per_processor"] else "", dim),
+                "    ", (f"(read over {source})" if source else "", dim),
+            ]
+            speeds = describe_cpu_speeds(self.cpu)
+            if speeds:
+                # Every clock we have, each labelled: a boost ceiling and an
+                # idling governor both look like "the speed" on their own.
+                parts.append("\n")
+                parts.append(("Speed  ", dim))
+                for index, (label, value) in enumerate(speeds):
+                    if index:
+                        parts.append("    ")
+                    parts += [(f"{label} ", dim), (value, "bold" if label == "nominal" else None)]
+        elif self.cpu_error:
+            parts += ["\n", ("Model  ", dim), ("could not read it: ", dim), self.cpu_error]
+        else:
+            parts += ["\n", ("Model  ", dim), ("unknown - press p to read it from the node", "italic")]
+        return Text.assemble(*parts)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="node-details-box"):
@@ -1106,6 +1804,10 @@ class NodeDetailsModal(ModalScreen[None]):
             return None
         return self.node_jobs[row]
 
+    def _alive(self) -> bool:
+        """Still on screen? See the note on JobDetailsModal._alive."""
+        return self.is_mounted and self in self.app.screen_stack
+
     def _request_refresh(self, source: str) -> None:
         self.run_worker(
             self._do_refresh(source), group="node-detail-refresh", exclusive=True
@@ -1113,7 +1815,7 @@ class NodeDetailsModal(ModalScreen[None]):
 
     async def _do_refresh(self, source: str) -> None:
         detail, jobs = await asyncio.to_thread(collect_node_info, self.node.name)
-        if not self.is_mounted:
+        if not self._alive():
             return
         stamp = time.strftime("%H:%M:%S")
         self.detail = detail
@@ -1123,11 +1825,43 @@ class NodeDetailsModal(ModalScreen[None]):
             self._set_status(f"Status: scontrol returned nothing for {self.node.name} - checked {stamp}")
             return
         self._set_status(
-            f"Status: updated ({source}) at {stamp} - Enter opens a job, f refreshes, c copies"
+            f"Status: updated ({source}) at {stamp} - Enter opens a job, f refreshes, "
+            "p reads the CPU, c copies"
         )
 
     def action_manual_refresh(self) -> None:
         self._request_refresh("manual")
+
+    def action_probe_cpu(self) -> None:
+        """Read the CPU model off the node itself, once, on request.
+
+        Never done as part of the ordinary refresh: it either opens an ssh
+        connection or submits a one-second job, and doing that for every node
+        on every tick would be a poor neighbour on a shared cluster.
+        """
+        if self.probing:
+            return
+        self.probing = True
+        self.cpu_error = ""
+        self._refresh_body()
+        self._set_status(f"Status: reading {self.node.name}'s CPU (ssh, then a one-second job)...")
+        self.run_worker(self._do_probe_cpu(), group="node-cpu-probe", exclusive=True)
+
+    async def _do_probe_cpu(self) -> None:
+        info, error = await asyncio.to_thread(probe_node_cpu, self.node.name)
+        if not self._alive():
+            return
+        self.probing = False
+        self.cpu = info
+        self.cpu_error = error
+        self._refresh_body()
+        nodes_view = getattr(self.app, "nodes_view", None)
+        if nodes_view is not None:
+            nodes_view.cpu_info = load_cpu_info()
+        if info:
+            self._set_status(f"Status: {self.node.name} is {describe_cpu(info)}")
+        else:
+            self._set_status(f"Status: could not read the CPU - {error}")
 
     def action_copy_node(self) -> None:
         n = self.node
@@ -1140,6 +1874,10 @@ class NodeDetailsModal(ModalScreen[None]):
             ("GRES", self._field("Gres", n.gres or "-")),
             ("GRES(used)", self._field("GresUsed")),
             ("PARTITIONS", self._field("Partitions")),
+            ("CPU(count)", f"{self._cpu_counts()['logical']} CPUs"),
+            ("CPU(layout)", cpu_topology(n) or "-"),
+            ("CPU(model)", self.cpu.get("model", "-") or "-"),
+            ("CPU(speed)", "  ".join(f"{k} {v}" for k, v in describe_cpu_speeds(self.cpu)) or "-"),
         ]
         self.app.push_screen(CopyModal(f"node {n.name}", fields))
 
@@ -1219,8 +1957,12 @@ class SlurmHtop(App):
     JobSearchModal {
         align: center middle;
     }
+    JobOutputModal {
+        align: center middle;
+    }
     #job-details-box {
-        width: 96;
+        width: 110;
+        max-width: 100%;
         height: auto;
         max-height: 80%;
         border: round $accent;
@@ -1232,6 +1974,11 @@ class SlurmHtop(App):
     #job-details-body {
         width: 1fr;
         height: auto;
+    }
+    #job-usage {
+        width: 1fr;
+        height: auto;
+        margin-top: 1;
     }
     #job-paths-scroll {
         width: 1fr;
@@ -1247,16 +1994,22 @@ class SlurmHtop(App):
         height: 2;
     }
     #job-details-status {
-        width: 96;
+        width: 110;
+        max-width: 100%;
         border: round $boost;
         padding: 0 2;
         background: $surface;
     }
     #job-actions {
-        width: 96;
+        width: 110;
+        max-width: 100%;
         height: 3;
         border: round $boost;
         background: $surface;
+        /* The row of actions is exactly one line tall, so a horizontal
+           scrollbar does not sit under it - it replaces it. Clip a row too
+           wide for the terminal rather than hide it. */
+        overflow-x: hidden;
     }
     #job-actions:focus {
         border: round $accent;
@@ -1265,6 +2018,68 @@ class SlurmHtop(App):
         background: $accent 60%;
         color: $text;
         text-style: bold;
+    }
+    #job-output-box {
+        width: 90%;
+        height: 1fr;
+        border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
+        padding: 1 2;
+        background: $surface;
+    }
+    #job-output-head {
+        width: 1fr;
+        height: auto;
+    }
+    /* Both panes share the box evenly. Textual gives a hidden widget no
+       space, so the single-stream views need no separate rule. */
+    .job-output-pane {
+        width: 1fr;
+        height: 1fr;
+        overflow-x: auto;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        border: round $boost;
+        border-title-color: $text-muted;
+        margin-top: 1;
+    }
+    #pane-stdout {
+        height: 2fr;
+    }
+    #pane-stderr {
+        height: 1fr;
+    }
+    .job-output-pane:focus {
+        border: round $accent;
+        border-title-color: $accent;
+    }
+    .job-output-pane > Static {
+        width: auto;
+        height: auto;
+    }
+    #job-output-actions {
+        width: 90%;
+        height: 3;
+        border: round $boost;
+        background: $surface;
+        /* Same reason as #job-actions: one line tall, so no scrollbar. */
+        overflow-x: hidden;
+    }
+    #job-output-actions:focus {
+        border: round $accent;
+    }
+    #job-output-actions > .datatable--cursor {
+        background: $accent 60%;
+        color: $text;
+        text-style: bold;
+    }
+    #job-output-status {
+        width: 90%;
+        border: round $boost;
+        padding: 0 2;
+        background: $surface;
     }
     #sort-help {
         width: 44;
@@ -1516,6 +2331,9 @@ class SlurmHtop(App):
         with self.batch_update():
             self.jobs_view.jobs = jobs
             self.nodes_view.nodes = nodes
+            # Cheap: re-read only when the file moved, so a CPU probe made in
+            # the editor extension shows up here on the next tick.
+            self.nodes_view.cpu_info = load_cpu_info()
             self.disk_usage_view.disks = disks
             self.gpu_status_view.jobs = jobs
             self.gpu_status_view.stats = summarize_gpus(nodes, jobs)
@@ -1541,6 +2359,13 @@ class SlurmHtop(App):
             self.notify("No job selected")
             return
         await self.push_screen(JobDetailsModal(selected_job))
+
+    async def action_open_selected_job_output(self) -> None:
+        selected_job = self.jobs_view.get_selected_job()
+        if not selected_job:
+            self.notify("No job selected")
+            return
+        await self.push_screen(JobOutputModal(selected_job))
 
     async def action_open_search(self) -> None:
         await self.push_screen(JobSearchModal(self.jobs_view.search_filter))

@@ -70,6 +70,32 @@ function configMessage(variant: Variant): HostMessage {
 }
 
 /**
+ * Read a node's CPU model on request and hand the refreshed detail back.
+ *
+ * Slurm knows how many cores a node has but not what they are, so this has to
+ * go out to the machine itself -- over ssh, or failing that a one-second job.
+ * That can take a while, hence the `started` message: the view says what it is
+ * waiting for instead of looking frozen.
+ */
+async function probeCpu(
+  client: SlurmClient,
+  log: vscode.OutputChannel,
+  node: string,
+  post: (message: HostMessage) => void
+): Promise<void> {
+  post({ type: 'cpuProbe', node, state: 'started' });
+  try {
+    const detail = await client.fetchDetail('node', node, { probeCpu: true });
+    post({ type: 'detail', detail });
+    const error = detail.kind === 'node' ? detail.cpu?.error : undefined;
+    post({ type: 'cpuProbe', node, state: 'done', message: error });
+  } catch (err) {
+    log.appendLine(`cpu probe failed for ${node}: ${String(err)}`);
+    post({ type: 'cpuProbe', node, state: 'done', message: String(err) });
+  }
+}
+
+/**
  * Wire one webview (sidebar view or dashboard panel) to the shared client.
  *
  * `isVisible` is a callback rather than a value because a WebviewView and a
@@ -137,6 +163,17 @@ export function bindWebview(
         case 'copy':
           await vscode.env.clipboard.writeText(raw.text);
           vscode.window.setStatusBarMessage(`Copied ${raw.label ?? 'value'}`, 2000);
+          break;
+        case 'togglePin':
+          try {
+            post({ type: 'pinned', pinned: await client.togglePin(raw.jobId) });
+          } catch (err) {
+            log.appendLine(`pin toggle failed for ${raw.jobId}: ${String(err)}`);
+            vscode.window.showWarningMessage(`Could not pin job ${raw.jobId}: ${String(err)}`);
+          }
+          break;
+        case 'probeCpu':
+          await probeCpu(client, log, raw.node, post);
           break;
         case 'showLog':
           log.show(true);

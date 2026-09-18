@@ -41,6 +41,26 @@ const COPY_ALL_BUTTON: vscode.QuickInputButton = {
 
 function jobRows(payload: JobDetail): Row[] {
   const rows: Row[] = [];
+  // The comparison first: every other section here is a field Slurm already
+  // prints, while this one is the arithmetic nothing prints.
+  for (const metric of payload.metrics ?? []) {
+    if (metric.kind === 'note') {
+      rows.push({ label: 'note', value: metric.note, section: 'asked for vs used' });
+      continue;
+    }
+    const used =
+      metric.kind === 'bar'
+        ? `${metric.percent?.toFixed(1)}% — ${metric.value} of ${metric.total}`
+        : metric.value;
+    rows.push({ label: metric.label, value: `${used} (${metric.note})`, section: 'asked for vs used' });
+  }
+  for (const [name, file] of Object.entries(payload.output ?? {})) {
+    rows.push({
+      label: name,
+      value: file.path || file.error,
+      section: 'output',
+    });
+  }
   if (payload.job) {
     for (const [key, value] of Object.entries(payload.job)) {
       if (value !== null && typeof value !== 'object') {
@@ -59,6 +79,43 @@ function jobRows(payload: JobDetail): Row[] {
 
 function nodeRows(payload: NodeDetail): Row[] {
   const rows: Row[] = [];
+  const cpu = payload.cpu;
+  if (cpu) {
+    // Slurm's own fields further down cover the layout; this section is the
+    // part Slurm cannot answer, so it only earns a row once it is known.
+    if (cpu.known) {
+      if (cpu.count_summary) {
+        rows.push({ label: 'processors', value: cpu.count_summary, section: 'processors' });
+      }
+      rows.push({ label: 'model', value: cpu.model, section: 'processors' });
+      if (cpu.cpus_total) {
+        rows.push({
+          label: 'CPUs',
+          value: `${cpu.cpus_total} logical, ${cpu.cores ?? 0} cores`,
+          section: 'processors',
+        });
+      }
+      for (const speed of cpu.speeds ?? []) {
+        rows.push({
+          label: speed.label === 'now' ? 'clock right now' : `${speed.label} clock`,
+          value: speed.value,
+          section: 'processors',
+        });
+      }
+      rows.push({ label: 'read over', value: cpu.source, section: 'processors' });
+    } else if (cpu.topology || cpu.sockets) {
+      rows.push({
+        label: 'layout',
+        value: cpu.topology || `${cpu.sockets} x ${cpu.cores_per_socket}C/${cpu.threads_per_core}T`,
+        section: 'processors',
+      });
+      rows.push({
+        label: 'model',
+        value: 'unknown — open this node in a tab to read it from the machine',
+        section: 'processors',
+      });
+    }
+  }
   for (const [key, value] of Object.entries(payload.detail ?? {})) {
     rows.push({ label: key, value: String(value), section: 'scontrol' });
   }

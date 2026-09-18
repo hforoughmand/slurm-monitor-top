@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import * as vscode from 'vscode';
 
 import { SlurmClient } from './client';
-import { detailPresentation, openDetailWindow } from './detail';
+import { detailPresentation, openDetailWindow, openJobOutput } from './detail';
 import { showDetailQuickPick } from './quickpick';
 import { bindWebview, renderHtml } from './view';
 
@@ -141,6 +141,64 @@ async function showDetails(
   await openDetailWindow(context, client, log, target);
 }
 
+/**
+ * Ask which of a job's two output files to open, then open it.
+ *
+ * The pick is skipped when there is only one file worth offering: most batch
+ * scripts send both streams to the same place, and a menu of one is noise.
+ */
+async function pickJobOutput(
+  client: SlurmClient,
+  log: vscode.OutputChannel,
+  jobId: string
+): Promise<void> {
+  let streams;
+  try {
+    const detail = await client.fetchDetail('job', jobId);
+    streams = detail.kind === 'job' ? detail.output : undefined;
+  } catch (err) {
+    log.appendLine(`output: could not look up job ${jobId}: ${String(err)}`);
+    vscode.window.showWarningMessage(`Could not look up job ${jobId}: ${String(err)}`);
+    return;
+  }
+  if (!streams) {
+    vscode.window.showWarningMessage(
+      `Slurm reported no output paths for job ${jobId}. Only the job's owner can see them.`
+    );
+    return;
+  }
+  const separate = (['stdout', 'stderr'] as const).filter(
+    (name) => !(name === 'stderr' && streams[name].merged)
+  );
+  const choices: (vscode.QuickPickItem & { streams: ('stdout' | 'stderr')[] })[] = separate.map((name) => ({
+    label: String(name),
+    description: streams[name].path || streams[name].error,
+    detail: streams[name].exists ? undefined : streams[name].error,
+    streams: [name],
+  }));
+  if (separate.length > 1) {
+    // Both is what you want when you do not yet know which stream said the
+    // useful thing, so it leads — as it does in the terminal UI's viewer.
+    choices.unshift({
+      label: 'both',
+      description: 'open stdout and stderr side by side',
+      detail: undefined,
+      streams: [...separate],
+    });
+  }
+  const chosen =
+    choices.length === 1
+      ? choices[0]
+      : await vscode.window.showQuickPick(choices, { placeHolder: `Output of job ${jobId}` });
+  if (!chosen) {
+    return;
+  }
+  for (const stream of chosen.streams) {
+    const file = streams[stream];
+    await openJobOutput(client, log, jobId, stream, file.path, file.size);
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const log = vscode.window.createOutputChannel('Slurm Monitor');
   const client = new SlurmClient(context.extensionPath, log);
@@ -172,6 +230,13 @@ export function activate(context: vscode.ExtensionContext): void {
       const id = nodeName ?? (await vscode.window.showInputBox({ prompt: 'Node name', placeHolder: 'node01' }));
       if (id) {
         await showDetails(context, client, log, { kind: 'node', id: id.trim() });
+      }
+    }),
+    vscode.commands.registerCommand('slurmTop.openJobOutput', async (jobId?: string) => {
+      const id =
+        jobId ?? (await vscode.window.showInputBox({ prompt: 'Slurm job id', placeHolder: '1234567' }));
+      if (id) {
+        await pickJobOutput(client, log, id.trim());
       }
     }),
     vscode.commands.registerCommand('slurmTop.openTerminalTui', async () => {

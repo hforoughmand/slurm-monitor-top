@@ -43,6 +43,15 @@
     selected: Object.assign({ jobs: null, nodes: null, gpus: null, disks: null }, saved.selected || {}),
     /** Rows currently on screen per section, so keyboard nav agrees with the DOM. */
     visible: { jobs: [], nodes: [], gpus: [], disks: [] },
+    /**
+     * Job ids pinned to the top. Owned by the collector's config file, not by
+     * this view, so a job pinned in the terminal UI is pinned here too; the
+     * local copy is updated optimistically so a click feels instant instead of
+     * waiting for the next snapshot.
+     */
+    pinned: /** @type {string[]} */ (saved.pinned || []),
+    /** Node whose CPU is being read right now, if any. */
+    probing: /** @type {string|null} */ (null),
   };
 
   function persist() {
@@ -53,6 +62,7 @@
       sort: state.sort,
       selected: state.selected,
       collapsed: state.collapsed,
+      pinned: state.pinned,
     });
   }
 
@@ -124,6 +134,24 @@
     return value === undefined || value === null || value === '' ? '-' : String(value);
   }
 
+  function isPinned(jobId) {
+    return state.pinned.indexOf(String(jobId)) >= 0;
+  }
+
+  /**
+   * Flip a pin now and tell the host to persist it.
+   *
+   * Applied locally first: the round trip spawns a collector process, and a
+   * star that takes half a second to light up feels broken.
+   */
+  function togglePin(jobId) {
+    const id = String(jobId);
+    state.pinned = isPinned(id) ? state.pinned.filter((x) => x !== id) : state.pinned.concat([id]);
+    persist();
+    updateSection('jobs');
+    vscode.postMessage({ type: 'togglePin', jobId: id });
+  }
+
   // ------------------------------------------------------------ column sets
 
   /**
@@ -131,6 +159,17 @@
    * sidebar, where there is room for roughly four of them.
    */
   const JOB_COLUMNS = [
+    {
+      key: 'pin',
+      label: '',
+      title: 'Pin this job to the top of the list',
+      // Clicking the star must not also open the job, so the cell swallows the
+      // row's double-click as well as its own click.
+      value: (j) => (isPinned(j.job_id) ? '\u2605' : '\u2606'),
+      cls: (j) => (isPinned(j.job_id) ? 'pin pinned' : 'pin'),
+      sortable: false,
+      onclick: (j) => togglePin(j.job_id),
+    },
     { key: 'job_id', label: 'JOBID', numeric: true, value: (j) => j.job_id, sort: (j) => jobIdKey(j.job_id) },
     { key: 'user', label: 'USER', value: (j) => j.user, compactHide: true },
     { key: 'state', label: 'ST', value: (j) => shortState(j.state), cls: (j) => stateClass(j.state), sort: (j) => jobStateRank(j.state) },
@@ -193,6 +232,20 @@
       cls: (n) => (n.gpu_total && n.gpu_free > 0 ? 'state-running' : 'state-other'),
     },
     { key: 'gres', label: 'GRES', value: (n) => (n.gpu_types || []).join(', ') || n.gres, compactHide: true },
+    {
+      key: 'cpu',
+      label: 'CPU',
+      // Slurm reports the layout but never the model, so an unprobed node
+      // shows what it does know: 2 x 64C/2T. Open the node to read the rest.
+      value: (n) => (n.cpu && n.cpu.known ? n.cpu.summary : (n.cpu || {}).topology || '-'),
+      sort: (n) => (n.cpu && n.cpu.known ? n.cpu.summary : ''),
+      cls: (n) => (n.cpu && n.cpu.known ? '' : 'dim'),
+      title: (n) =>
+        n.cpu && n.cpu.known
+          ? `${n.cpu.model} (read over ${n.cpu.source})`
+          : 'Open this node to read its CPU model',
+      compactHide: true,
+    },
   ];
 
   const DISK_COLUMNS = [
@@ -263,17 +316,29 @@
       .includes(needle);
   }
 
+  /**
+   * Move pinned jobs to the front, keeping the order within both groups.
+   *
+   * Done after sorting rather than inside the comparator, so reversing the
+   * sort direction does not flip the pinned rows to the bottom.
+   */
+  function pinnedFirst(rows) {
+    if (!state.pinned.length) return rows;
+    return rows.filter((j) => isPinned(j.job_id)).concat(rows.filter((j) => !isPinned(j.job_id)));
+  }
+
   function sortRows(section, rows, columns) {
     const setting = state.sort[section] || { key: 'default', desc: false };
     if (section === 'jobs' && setting.key === 'default') {
       // The TUI's natural order: running first, then by job id.
-      return rows.slice().sort((a, b) => jobStateRank(a.state) - jobStateRank(b.state) || jobIdKey(a.job_id) - jobIdKey(b.job_id));
+      return pinnedFirst(rows.slice().sort((a, b) => jobStateRank(a.state) - jobStateRank(b.state) || jobIdKey(a.job_id) - jobIdKey(b.job_id)));
     }
     const column = columns.find((c) => c.key === setting.key);
-    if (!column) return rows.slice();
+    if (!column) return section === 'jobs' ? pinnedFirst(rows.slice()) : rows.slice();
     const keyOf = column.sort || column.value;
     const sorted = rows.slice().sort((a, b) => compareValues(keyOf(a), keyOf(b)));
-    return setting.desc ? sorted.reverse() : sorted;
+    const ordered = setting.desc ? sorted.reverse() : sorted;
+    return section === 'jobs' ? pinnedFirst(ordered) : ordered;
   }
 
   function rowsFor(section) {
@@ -333,16 +398,19 @@
 
     const headRow = el('tr');
     const headers = columns.map((column) => {
+      const sortable = column.sortable !== false;
       const th = el('th', {
-        class: column.numeric ? 'numeric' : '',
+        class: [column.numeric ? 'numeric' : '', sortable ? '' : 'unsortable'].filter(Boolean).join(' '),
         text: column.label,
-        title: `Sort by ${column.label}`,
-        onclick: () => {
-          const current = state.sort[section] || {};
-          state.sort[section] = current.key === column.key ? { key: column.key, desc: !current.desc } : { key: column.key, desc: false };
-          persist();
-          updateSection(section);
-        },
+        title: sortable ? `Sort by ${column.label}` : column.title || '',
+        onclick: sortable
+          ? () => {
+              const current = state.sort[section] || {};
+              state.sort[section] = current.key === column.key ? { key: column.key, desc: !current.desc } : { key: column.key, desc: false };
+              persist();
+              updateSection(section);
+            }
+          : null,
       });
       headRow.appendChild(th);
       return { column, th };
@@ -357,7 +425,7 @@
 
     const controls = section === 'jobs' ? jobControls() : [];
     const { panel, count } = makePanel(section, spec.title, controls, body);
-    panels[section] = { panel, count, tbody, headers, columns, table, empty, spec, rowNodes: new Map() };
+    panels[section] = { panel, count, tbody, headers, columns, table, empty, spec, rowNodes: new Map(), rowData: new Map() };
     return panel;
   }
 
@@ -462,6 +530,7 @@
     for (const row of rows) {
       const id = String(panel.spec.id(row));
       seen.add(id);
+      panel.rowData.set(id, row);
       let node = panel.rowNodes.get(id);
       if (!node) {
         node = makeRow(section, panel, id);
@@ -479,6 +548,7 @@
       if (!seen.has(id)) {
         node.tr.remove();
         panel.rowNodes.delete(id);
+        panel.rowData.delete(id);
       }
     }
 
@@ -503,6 +573,16 @@
     });
     const cells = panel.columns.map((column) => {
       const td = el('td', { class: column.numeric ? 'numeric' : '' });
+      if (column.onclick) {
+        td.addEventListener('click', (event) => {
+          // Without this the click would also select the row, and a
+          // double-click on the star would open the job behind it.
+          event.stopPropagation();
+          const row = panel.rowData.get(id);
+          if (row) column.onclick(row);
+        });
+        td.addEventListener('dblclick', (event) => event.stopPropagation());
+      }
       let barNode = null;
       if (column.bar) {
         td.classList.add('with-bar');
@@ -520,10 +600,12 @@
   function fillRow(node, panel, row, mine, selected) {
     for (const cell of node.cells) {
       const value = show(cell.column.value(row));
+      const tooltip = typeof cell.column.title === 'function' ? cell.column.title(row) : cell.column.title;
       if (cell.text.nodeValue !== value) {
         cell.text.nodeValue = value;
-        cell.td.title = value;
       }
+      const wanted = tooltip || value;
+      if (cell.td.title !== wanted) cell.td.title = wanted;
       if (cell.barNode) setBar(cell.barNode, cell.column.bar(row));
       const extra = cell.column.cls ? cell.column.cls(row) : '';
       const base = [cell.column.numeric ? 'numeric' : '', cell.barNode ? 'with-bar' : '', extra].filter(Boolean).join(' ');
@@ -592,6 +674,9 @@
     } else if (event.key.toLowerCase() === 'c' && index >= 0) {
       event.preventDefault();
       copyRow(section, rows[index]);
+    } else if (event.key.toLowerCase() === 'p' && index >= 0 && section === 'jobs') {
+      event.preventDefault();
+      togglePin(rows[index].job_id);
     }
   }
 
@@ -683,8 +768,137 @@
     showOverlay(`GPU ${type}`, children);
   }
 
+  /**
+   * Colour a metric bar by which end of its scale is the bad one.
+   *
+   * `setBar` treats a full bar as the dangerous one, which is right for a
+   * memory limit and exactly wrong for CPU efficiency: a job using 5% of the
+   * cores it reserved is the one wasting the machine.
+   */
+  function setMetricBar(node, percent, risk) {
+    const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+    const bad = risk === 'low' ? pct < 25 : pct >= 90;
+    const warn = risk === 'low' ? pct < 60 : pct >= 75;
+    node.className = `bar${bad ? ' high' : warn ? ' warn' : ''}`;
+    /** @type {HTMLElement} */ (node.firstChild).style.width = pct.toFixed(1) + '%';
+  }
+
+  function metricsTable(metrics) {
+    const rows = [];
+    for (const metric of metrics) {
+      if (metric.kind === 'note') {
+        rows.push(el('tr', {}, [el('td', { class: 'hint', colspan: '5', text: metric.note })]));
+        continue;
+      }
+      const cells = [el('td', { class: 'metric-label', text: metric.label })];
+      if (metric.kind === 'bar') {
+        const gauge = bar();
+        setMetricBar(gauge, metric.percent, metric.risk);
+        cells.push(el('td', { class: 'with-bar' }, [gauge]));
+        cells.push(el('td', { class: 'numeric', text: `${Number(metric.percent).toFixed(1)}%` }));
+        cells.push(el('td', { class: 'numeric', text: `${metric.value} of ${metric.total}` }));
+      } else {
+        cells.push(el('td', { class: 'with-bar' }));
+        cells.push(el('td', { class: 'numeric' }));
+        cells.push(el('td', { class: 'numeric', text: metric.value }));
+      }
+      cells.push(el('td', { class: 'dim', text: metric.note }));
+      rows.push(el('tr', {}, cells));
+    }
+    return el('table', { class: 'metrics' }, [el('tbody', {}, rows)]);
+  }
+
+  /**
+   * The two files a job writes to.
+   *
+   * Slurm records the paths and nothing else, so the buttons go to the host:
+   * it opens the real file when this machine can see it, and falls back to
+   * fetching the tail through the collector when it cannot.
+   */
+  function outputChildren(payload) {
+    const streams = payload.output || {};
+    const jobId = String(payload.job_id);
+    const rows = [];
+    for (const name of ['stdout', 'stderr']) {
+      const file = streams[name];
+      if (!file) continue;
+      if (name === 'stderr' && file.merged) {
+        // One file, so one row: a second Open button for the same path would
+        // only invite the question of how the two differ.
+        rows.push(
+          el('tr', {}, [
+            el('td', { class: 'metric-label', text: 'stderr' }),
+            el('td', { class: 'dim', colspan: '3', text: 'merged into stdout — the job asked for one file' }),
+          ])
+        );
+        continue;
+      }
+      const where = file.exists
+        ? `${formatBytes(file.size)} · written ${new Date(file.modified * 1000).toLocaleTimeString()}`
+        : file.error;
+      rows.push(
+        el('tr', {}, [
+          el('td', { class: 'metric-label', text: name }),
+          el('td', { class: file.path ? '' : 'dim', text: file.path || '—' }),
+          el('td', { class: 'dim', text: where }),
+          el('td', {}, [
+            file.exists
+              ? el('button', {
+                  text: 'Open',
+                  title: 'Opens the file in an editor tab, or its tail when this machine cannot see it',
+                  onclick: () =>
+                    vscode.postMessage({
+                      type: 'openOutput', jobId, stream: name, path: file.path, size: file.size,
+                    }),
+                })
+              : null,
+            file.path
+              ? el('button', {
+                  text: 'Copy path',
+                  onclick: () => vscode.postMessage({ type: 'copy', text: file.path, label: `${name} path` }),
+                })
+              : null,
+          ]),
+        ])
+      );
+    }
+    if (!rows.length) return [];
+    return [el('h3', { text: 'output' }), el('table', { class: 'metrics outputs' }, [el('tbody', {}, rows)])];
+  }
+
+  function formatBytes(size) {
+    const units = ['B', 'K', 'M', 'G', 'T'];
+    let value = Number(size) || 0;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit += 1;
+    }
+    return unit === 0 ? `${value}B` : `${value.toFixed(1)}${units[unit]}`;
+  }
+
   function detailJobChildren(payload) {
     const children = [];
+    const jobId = String(payload.job_id);
+    children.push(
+      el('p', { class: 'hint' }, [
+        el('button', {
+          text: isPinned(jobId) ? '\u2605 Unpin this job' : '\u2606 Pin this job',
+          title: 'Pinned jobs are listed first, in the editor and in the terminal UI',
+          onclick: () => {
+            togglePin(jobId);
+            presentDetail(payload);
+          },
+        }),
+      ])
+    );
+    if ((payload.metrics || []).length) {
+      // Lead with the comparison: "16 CPUs" is in the scontrol block below,
+      // but "one of those 16 is working" is only here.
+      children.push(el('h3', { text: 'asked for vs used' }));
+      children.push(metricsTable(payload.metrics));
+    }
+    children.push(...outputChildren(payload));
     if (payload.job) {
       children.push(el('h3', { text: 'squeue' }));
       children.push(kvList(payload.job));
@@ -703,8 +917,73 @@
     return children;
   }
 
+  /**
+   * The "what are these processors" block.
+   *
+   * Slurm answers "how many" on every refresh but never "which model" or "how
+   * fast": that lives on the node itself. So the block always shows the layout
+   * and offers to go and read the rest, once, on request.
+   */
+  function detailCpuChildren(payload) {
+    const cpu = payload.cpu || {};
+    const node = payload.node;
+    const busy = state.probing === node;
+    const children = [el('h3', { text: 'processors' })];
+
+    const facts = {};
+    const total = cpu.cpus_total || (cpu.sockets || 0) * (cpu.cores_per_socket || 0) * (cpu.threads_per_core || 0);
+    // Lead with what the machine adds up to; the breakdown that produces it
+    // follows, so "how many of what" is answered before the arithmetic.
+    if (cpu.known && cpu.count_summary) facts.processors = cpu.count_summary;
+    if (total) facts['logical CPUs'] = total;
+    if (cpu.cores) facts['physical cores'] = cpu.cores;
+    if (cpu.sockets) facts.sockets = cpu.sockets;
+    if (cpu.cores_per_socket) facts['cores per socket'] = cpu.cores_per_socket;
+    if (cpu.threads_per_core) facts['threads per core'] = cpu.threads_per_core;
+    if (cpu.arch) facts.architecture = cpu.arch;
+    if (cpu.known) {
+      facts.model = cpu.model;
+      // Each clock says what it is: a boost ceiling and an idling governor
+      // both read as "the speed" when the label is dropped.
+      for (const speed of cpu.speeds || []) {
+        facts[speed.label === 'now' ? 'clock right now' : `${speed.label} clock`] = speed.value;
+      }
+      if (!(cpu.speeds || []).length && cpu.speed) facts.clock = cpu.speed;
+      if (cpu.vendor) facts.vendor = cpu.vendor;
+      facts['read over'] = cpu.source;
+    }
+    children.push(kvList(facts));
+
+    if (!cpu.known) {
+      children.push(
+        el('p', { class: 'hint' }, [
+          el('span', {
+            text: busy
+              ? 'Reading the CPU from the node\u2026 '
+              : 'Slurm does not report the CPU model or its speed. ',
+          }),
+          busy
+            ? null
+            : el('button', {
+                text: 'Read it from the node',
+                title: 'Connects over ssh, or failing that runs a one-second job there',
+                onclick: () => {
+                  state.probing = node;
+                  vscode.postMessage({ type: 'probeCpu', node });
+                  presentDetail(payload);
+                },
+              }),
+        ])
+      );
+    }
+    if (cpu.error) {
+      children.push(el('p', { class: 'hint error-text', text: `Could not read it: ${cpu.error}` }));
+    }
+    return children;
+  }
+
   function detailNodeChildren(payload) {
-    const children = [];
+    const children = detailCpuChildren(payload);
     if (payload.detail && Object.keys(payload.detail).length) {
       children.push(el('h3', { text: 'scontrol' }));
       children.push(kvList(payload.detail));
@@ -825,6 +1104,7 @@
         break;
       }
       case 'snapshot':
+        if (Array.isArray(message.snapshot.pinned)) state.pinned = message.snapshot.pinned;
         if (isDetailView) break;
         state.snapshot = message.snapshot;
         setStatus(null);
@@ -847,6 +1127,23 @@
         break;
       case 'detailTarget':
         setStatus(`Loading ${message.kind} ${message.id}…`);
+        break;
+      case 'pinned':
+        // The host is the authority: a pin made in the terminal UI, or one of
+        // ours that failed to persist, corrects the optimistic local list.
+        state.pinned = message.pinned || [];
+        persist();
+        if (!isDetailView) updateSection('jobs');
+        break;
+      case 'cpuProbe':
+        state.probing = message.state === 'started' ? message.node : null;
+        if (message.state === 'started') {
+          setStatus(`Reading ${message.node}'s CPU — ssh, then a one-second job…`);
+        } else if (message.message) {
+          setStatus(`Could not read ${message.node}'s CPU: ${message.message}`, 'error');
+        } else {
+          setStatus(null);
+        }
         break;
     }
   });

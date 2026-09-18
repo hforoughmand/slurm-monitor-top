@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- **What a job asked for against what it is using.** Job details open with a
+  block of bars: elapsed time against the limit, CPU time against the cores the
+  job holds, peak memory against the reservation. Each is coloured by which end
+  of its scale is the dangerous one, so a job at 95% of its memory and a job at
+  6% of its cores both read as red — one is about to be killed, the other is
+  holding fifteen cores idle. The live figures come from `sstat`, which answers
+  only for your own running jobs; on anyone else's the block says so rather than
+  drawing an empty bar.
+- **The job's stdout and stderr.** Each stream is listed with its path, size and
+  last write, and **Open** opens the real file as an editor tab — so it searches
+  and follows like any other file. When the file is not reachable from this
+  machine (a remote `slurmTop.command`) or is too large to open whole, the last
+  1000 lines are fetched through the collector instead.
+- **Slurm: Open Job Output (stdout/stderr)…**, for going straight to a job's log
+  from the command palette — offering **both**, stdout or stderr when the job
+  wrote two files.
+
+- **Pin the jobs you are watching.** Click the star at the left of a job row, or
+  press <kbd>p</kbd>, and that job leads the table whatever the sort says. Pins
+  are stored by the collector rather than by the editor, so they are shared with
+  the `slurm-top` terminal dashboard and agree across the sidebar and the
+  dashboard tab.
+- **CPU model and speed per machine.** Slurm reports how many cores a node has
+  and how they are arranged, but never what they are, so the new `CPU` column
+  starts out showing the layout (`2 x 64C/2T`). Open a machine and press
+  **Read it from the node** to fill in the model and clock: the collector goes
+  over `ssh`, and if the node refuses falls back to a one-second Slurm job that
+  runs `lscpu`. The answer is cached and shared with the terminal UI, so each
+  machine is read once. Nothing is ever probed unless you ask.
+- `slurmTop.cpuProbeUsesSrun` (default `true`) turns off that second route, for
+  clusters where submitting a probe job is unwelcome.
+
+### Changed
+
+- A machine's details now open with a **processors** section above the raw
+  `scontrol` fields: how many chips of which model (`2 x EPYC 7763`), logical
+  CPUs against physical cores, the socket/core/thread breakdown, and the
+  architecture.
+- Nothing in the editor views cancels or requeues a job — those actions live in
+  the terminal dashboard, where they now need `Ctrl+X` and `Ctrl+R` rather than
+  a bare letter.
+- Every clock is labelled with what it is — `nominal clock` for the speed the
+  machine runs at, `max clock` for a boost ceiling, `clock right now` for
+  whatever the governor was doing — rather than one unqualified number.
+
 ## 0.5.0
 
 ### Changed

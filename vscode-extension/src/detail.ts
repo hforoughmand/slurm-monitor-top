@@ -3,6 +3,95 @@ import * as vscode from 'vscode';
 import { SlurmClient } from './client';
 import { DetailPresentation, JobDetail, NodeDetail } from './types';
 
+/** Past this, opening the file whole is a bad idea; the tail is offered first. */
+const LARGE_OUTPUT_BYTES = 25 * 1024 * 1024;
+/** How much of a log the fallback fetches when the file itself is out of reach. */
+const TAIL_LINES = 1000;
+
+function humanBytes(size: number): string {
+  const units = ['B', 'K', 'M', 'G', 'T'];
+  let value = size;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${value}B` : `${value.toFixed(1)}${units[unit]}`;
+}
+
+/**
+ * Show a job's stdout or stderr.
+ *
+ * The real file in an editor is the better answer whenever it can be had: it
+ * follows, it searches, it is a normal tab. Two cases it cannot cover, and
+ * both fall back to fetching the tail through the collector:
+ *
+ * - the collector runs somewhere else (a remote `slurmTop.command`), so the
+ *   path exists on the cluster and not on this machine;
+ * - the file is enormous, and a job that has been printing for a week should
+ *   not be pulled through in full just to see the last few lines.
+ */
+export async function openJobOutput(
+  client: SlurmClient,
+  log: vscode.OutputChannel,
+  jobId: string,
+  stream: 'stdout' | 'stderr',
+  path: string,
+  size = 0
+): Promise<void> {
+  if (path && size > LARGE_OUTPUT_BYTES) {
+    const whole = 'Open the whole file';
+    const choice = await vscode.window.showWarningMessage(
+      `${path} is ${humanBytes(size)}.`,
+      { modal: false },
+      whole,
+      `Last ${TAIL_LINES} lines`
+    );
+    if (!choice) {
+      return;
+    }
+    if (choice === whole) {
+      await openFile(path, log);
+      return;
+    }
+  } else if (path && (await openFile(path, log))) {
+    return;
+  }
+
+  try {
+    const payload = await client.fetchJobOutput(jobId, stream, TAIL_LINES);
+    const tail = payload.output;
+    if (!tail.text) {
+      vscode.window.showWarningMessage(
+        `No ${stream} to show for job ${jobId}: ${tail.error || 'the file is empty'}`
+      );
+      return;
+    }
+    const header =
+      `${stream} of job ${jobId} — last ${tail.line_count} line(s) of ${tail.path}` +
+      `${tail.truncated ? ' (the file is longer)' : ''} — read at ${new Date().toLocaleTimeString()}\n\n`;
+    const document = await vscode.workspace.openTextDocument({ content: header + tail.text });
+    await vscode.window.showTextDocument(document, { preview: false });
+  } catch (err) {
+    log.appendLine(`output: could not read ${stream} of ${jobId}: ${String(err)}`);
+    vscode.window.showWarningMessage(`Could not read the ${stream} of job ${jobId}: ${String(err)}`);
+  }
+}
+
+/** Open a path as an ordinary editor tab; false when it is not reachable here. */
+async function openFile(path: string, log: vscode.OutputChannel): Promise<boolean> {
+  const uri = vscode.Uri.file(path);
+  try {
+    await vscode.workspace.fs.stat(uri);
+    const document = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(document, { preview: false });
+    return true;
+  } catch (err) {
+    log.appendLine(`output: ${path} is not readable from this machine (${String(err)})`);
+    return false;
+  }
+}
+
 /** Moves the active editor into a floating window; VS Code 1.85 and later. */
 const MOVE_TO_NEW_WINDOW = 'workbench.action.moveEditorToNewWindow';
 
@@ -64,7 +153,17 @@ class DetailWindow {
     this.disposables.push(
       panel.webview.onDidReceiveMessage(async (message) => {
         if (message.type === 'ready' || message.type === 'refreshDetail') {
+          // A detail window opens with no pin list of its own, so seed it from
+          // the collector's latest snapshot before the first paint.
+          void this.panel.webview.postMessage({
+            type: 'pinned',
+            pinned: this.client.latest?.pinned ?? [],
+          });
           await this.load();
+        } else if (message.type === 'probeCpu') {
+          await this.probeCpu(String(message.node));
+        } else if (message.type === 'togglePin') {
+          await this.togglePin(String(message.jobId));
         } else if (message.type === 'copy') {
           await vscode.env.clipboard.writeText(message.text);
           vscode.window.setStatusBarMessage(`Copied ${message.label ?? 'value'}`, 2000);
@@ -73,6 +172,15 @@ class DetailWindow {
           this.show({ kind: message.kind, id: String(message.id) });
         } else if (message.type === 'closeDetail') {
           this.panel.dispose();
+        } else if (message.type === 'openOutput') {
+          await openJobOutput(
+            this.client,
+            this.log,
+            String(message.jobId),
+            message.stream === 'stderr' ? 'stderr' : 'stdout',
+            String(message.path ?? ''),
+            Number(message.size ?? 0)
+          );
         } else if (message.type === 'showLog') {
           this.log.show(true);
         }
@@ -99,6 +207,43 @@ class DetailWindow {
     // Once the panel lives in a floating window this raises that window; the
     // column is whatever VS Code assigned it there.
     this.panel.reveal(this.panel.viewColumn, true);
+  }
+
+  /**
+   * Read this node's CPU off the machine, then redraw with the answer.
+   *
+   * Bypasses the `busy` guard's purpose deliberately: a probe is something the
+   * user asked for by clicking, and it must not be dropped because a periodic
+   * refresh happens to be in flight.
+   */
+  private async probeCpu(node: string): Promise<void> {
+    void this.panel.webview.postMessage({ type: 'cpuProbe', node, state: 'started' });
+    try {
+      const detail = await this.client.fetchDetail('node', node, { probeCpu: true });
+      if (this.target?.kind === 'node' && this.target.id === node) {
+        void this.panel.webview.postMessage({ type: 'detail', detail });
+      }
+      const error = detail.kind === 'node' ? detail.cpu?.error : undefined;
+      void this.panel.webview.postMessage({ type: 'cpuProbe', node, state: 'done', message: error });
+    } catch (err) {
+      this.log.appendLine(`detail window: cpu probe for ${node} failed: ${String(err)}`);
+      void this.panel.webview.postMessage({
+        type: 'cpuProbe',
+        node,
+        state: 'done',
+        message: String(err),
+      });
+    }
+  }
+
+  private async togglePin(jobId: string): Promise<void> {
+    try {
+      const pinned = await this.client.togglePin(jobId);
+      void this.panel.webview.postMessage({ type: 'pinned', pinned });
+    } catch (err) {
+      this.log.appendLine(`detail window: pin toggle for ${jobId} failed: ${String(err)}`);
+      vscode.window.showWarningMessage(`Could not pin job ${jobId}: ${String(err)}`);
+    }
   }
 
   private async load(): Promise<void> {

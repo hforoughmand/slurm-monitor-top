@@ -20,6 +20,9 @@ another front end (such as the VS Code extension).
   slurm-top --json --watch 3    stream one snapshot per line every 3 seconds
   slurm-top --json --job 1234   details for one job
   slurm-top --json --node n01   details for one node
+  slurm-top --json --node n01 --probe-cpu
+                                read that node's CPU model and clock
+  slurm-top --json --pin 1234   pin a job to the top of both front ends
   slurm-top --json --help       all JSON options
 """
 
