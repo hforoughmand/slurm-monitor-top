@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -182,6 +183,21 @@ async def scene_panel_resize(app, pilot):
     await pilot.pause(0.4)
 
 
+# The popup each scene has to end on. Without this check a scene whose
+# keypress landed on an empty table photographed the dashboard behind it: no
+# error, no empty file, just a screenshot quietly missing its subject.
+EXPECTED_SCREEN = {
+    "job-search": "JobSearchModal",
+    "job-details": "JobDetailsModal",
+    "job-usage": "JobDetailsModal",
+    "job-output": "JobOutputModal",
+    "node-details": "NodeDetailsModal",
+    "node-cpu": "NodeDetailsModal",
+    "gpu-jobs": "GpuJobsModal",
+    "copy-popup": "CopyModal",
+    "sort-picker": "SortPickerModal",
+}
+
 SCENES = {
     "overview": scene_overview,
     "job-search": scene_job_search,
@@ -200,6 +216,28 @@ SCENES = {
 }
 
 
+# How long to wait for the first refresh. Every fake command is a Python
+# interpreter start, and four of them run per refresh, so a second or two is
+# normal and a loaded machine takes longer. The old two-second ceiling was
+# under that on a bad day, and a scene that went ahead anyway pressed Enter on
+# an empty table.
+DATA_TIMEOUT = 60.0
+
+
+async def wait_for_data(app, timeout=DATA_TIMEOUT):
+    """Block until the first refresh has actually landed in all three tables."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if app.jobs_view.jobs and app.nodes_view.nodes and app.disk_usage_view.disks:
+            return
+        await asyncio.sleep(0.05)
+    raise RuntimeError(
+        f"the fake cluster answered nothing within {timeout:.0f}s "
+        f"(jobs={len(app.jobs_view.jobs)} nodes={len(app.nodes_view.nodes)} "
+        f"disks={len(app.disk_usage_view.disks)}) - is PATH pointing at fake_cluster.py?"
+    )
+
+
 async def shoot(name, scene, out_svg):
     from slurm_top.app import SlurmHtop
 
@@ -207,12 +245,15 @@ async def shoot(name, scene, out_svg):
     async with app.run_test(size=TERMINAL_SIZE) as pilot:
         # The first refresh is a worker; wait for it before touching rows.
         await pilot.pause()
-        for _ in range(40):
-            if app.jobs_view.jobs:
-                break
-            await asyncio.sleep(0.05)
+        await wait_for_data(app)
         await pilot.pause()
         await scene(app, pilot)
+        expected = EXPECTED_SCREEN.get(name)
+        if expected is not None and type(app.screen).__name__ != expected:
+            raise RuntimeError(
+                f"{name}: expected {expected} on screen, found "
+                f"{type(app.screen).__name__} - the scene's keypress did not open it"
+            )
         out_svg.write_text(patch_svg(app.export_screenshot(title="slurm-top")))
 
 
