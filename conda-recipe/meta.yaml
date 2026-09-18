@@ -6,9 +6,9 @@ package:
   version: {{ version }}
 
 source:
-  # Built from the PyPI sdist; update `version` and `sha256` on every release
-  # (`sha256sum dist/slurm_monitor_top-<version>.tar.gz`).
-  url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/slurm_monitor_top-{{ version }}.tar.gz
+  # Built from the PyPI sdist; on every release bump `version` and replace the
+  # hash with `sha256sum dist/slurm_monitor_top-<version>.tar.gz`.
+  url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/slurm_monitor_top-{{ version }}.tar.gz
   sha256: 0173718e016b8a02a57f2f603f7a30457010b4cf086b0ff1f9cc1b9a30af0781
 
 build:
@@ -18,27 +18,28 @@ build:
   entry_points:
     - slurm-top = slurm_top.cli:main
     - stop = slurm_top.cli:main
+  run_exports:
+    - {{ pin_subpackage("slurm-monitor-top", max_pin="x") }}
 
 requirements:
   host:
-    - python >={{ python_min }}
+    - python >=3.9
     - pip
     - setuptools >=61
   run:
-    - python >={{ python_min }}
+    - python >=3.9
     - rich
     - textual
 
 test:
-  # The entry points open a full-screen TUI, so they cannot be run in a build
-  # sandbox; import + metadata checks are all that is safe here.
+  # Both entry points open a full-screen TUI and never return, so they cannot
+  # be executed in a build sandbox; import and metadata checks only.
   imports:
     - slurm_top
   commands:
     - pip check
   requires:
     - pip
-    - python {{ python_min }}
 
 about:
   home: https://github.com/hforoughmand/slurm-monitor-top
@@ -46,10 +47,11 @@ about:
   description: |
     A terminal dashboard for Slurm clusters, inspired by htop. Shows live jobs,
     nodes, GPU status and disk usage, with sorting, filtering, free-text search,
-    per-job and per-node detail popups, and job control (cancel/hold/release/
-    requeue). Requires the Slurm client commands (squeue, sinfo, scontrol) in
+    per-job and per-node detail popups, and job control (cancel, hold, release,
+    requeue). The Slurm client commands (squeue, sinfo, scontrol) must be in
     PATH at run time; they are not provided by this package.
   license: MIT
+  license_family: MIT
   license_file: LICENSE
   doc_url: https://github.com/hforoughmand/slurm-monitor-top#readme
   dev_url: https://github.com/hforoughmand/slurm-monitor-top
