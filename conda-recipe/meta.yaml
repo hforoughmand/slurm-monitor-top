@@ -1,0 +1,59 @@
+{% set name = "slurm-monitor-top" %}
+{% set version = "0.3.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  # Built from the PyPI sdist; update `version` and `sha256` on every release
+  # (`sha256sum dist/slurm_monitor_top-<version>.tar.gz`).
+  url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/slurm_monitor_top-{{ version }}.tar.gz
+  sha256: 0173718e016b8a02a57f2f603f7a30457010b4cf086b0ff1f9cc1b9a30af0781
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - slurm-top = slurm_top.cli:main
+    - stop = slurm_top.cli:main
+
+requirements:
+  host:
+    - python >={{ python_min }}
+    - pip
+    - setuptools >=61
+  run:
+    - python >={{ python_min }}
+    - rich
+    - textual
+
+test:
+  # The entry points open a full-screen TUI, so they cannot be run in a build
+  # sandbox; import + metadata checks are all that is safe here.
+  imports:
+    - slurm_top
+  commands:
+    - pip check
+  requires:
+    - pip
+    - python {{ python_min }}
+
+about:
+  home: https://github.com/hforoughmand/slurm-monitor-top
+  summary: htop-like monitor for Slurm jobs
+  description: |
+    A terminal dashboard for Slurm clusters, inspired by htop. Shows live jobs,
+    nodes, GPU status and disk usage, with sorting, filtering, free-text search,
+    per-job and per-node detail popups, and job control (cancel/hold/release/
+    requeue). Requires the Slurm client commands (squeue, sinfo, scontrol) in
+    PATH at run time; they are not provided by this package.
+  license: MIT
+  license_file: LICENSE
+  doc_url: https://github.com/hforoughmand/slurm-monitor-top#readme
+  dev_url: https://github.com/hforoughmand/slurm-monitor-top
+
+extra:
+  recipe-maintainers:
+    - hforoughmand

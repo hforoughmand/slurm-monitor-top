@@ -19,3 +19,6 @@ build/
 .vscode/
 *.swp
 .DS_Store
+
+# Vendored build/publish tooling (pip install --target .pkg-tools)
+.pkg-tools/

@@ -13,8 +13,10 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
 
 ## Features
 
-- Live jobs table with interactive sort and filters
-- Live node/server table (CPU and memory totals, reserved, and free)
+- Live jobs table with interactive sort, filters and free-text search
+- Live node/server table (CPU and memory totals, reserved, and free), with a
+  per-node details popup (`Enter`) listing the jobs on that node
+- Copy popup (`c`) for the selected row of any panel, so values can be pasted elsewhere
 - Live disk table (`df -h`) with usage, mount path, type, and size
 - Job statistics split by:
   - all users
@@ -25,7 +27,7 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
   - total GPUs
   - active GPUs (running jobs)
   - reserved GPUs (pending jobs)
-- Auto refresh every 3 seconds
+- Auto refresh every 3 seconds that keeps your scroll position and selection
 
 ## Requirements
 
@@ -84,16 +86,50 @@ twine check dist/*
 - `s` toggle sort-pick mode
 - `d` asc/desc
 - `f` owner filter (`all`, `me`, `others`)
+- `/` open the job search popup (free-text filter, applied while you type)
+- `c` open the copy popup for the selected row of the focused panel
 - `Enter` open selected job details popup
 - `Alt+Left/Right` shrink/grow currently focused panel (tab/click to focus)
 - `0` reset panel layout
+- In the nodes panel, `Enter` opens the node details popup
 - In GPU status panel, `Enter` opens jobs using/reserving selected GPU type
 - In job details popup:
   - `c` cancel job
   - `h` hold job
   - `u` release job
   - `r` requeue job
+  - `f` refresh now, `a` toggle auto-update
+  - `y` copy popup for this job (work dir, command, stdout/stderr paths, ...)
   - `Esc` close popup
+- In node details popup:
+  - `Enter` open the details of the selected job on that node
+  - `f` refresh now
+  - `c` copy popup for this node
+  - `Esc` close popup
+- In the copy popup:
+  - `Enter` or mouse click copies the highlighted field
+  - `a` copies the whole row as one tab-separated line
+  - `Esc` close popup
+
+## Searching jobs
+
+`/` opens a popup with a single input box. Filtering happens live as you type
+and every whitespace-separated term has to match somewhere in the row (job id,
+user, state, partition, name, node list, CPUs, memory, GRES, time). An empty
+box shows all jobs again. The active search, the owner filter, the sort key and
+the number of shown/total jobs are all written into the Jobs panel border, e.g.
+`Jobs 4/50 | owner=me | sort=state asc | find="train"`.
+
+## Copying values
+
+Terminal DataTables own the mouse for their own row cursor, so dragging over
+the jobs or nodes table does not select text. Instead press `c` (or `y` in the
+job details popup) to open the copy popup, then `Enter` / click a field. The
+value is sent to the system clipboard with an OSC 52 escape, which works over
+SSH in most modern terminals; if yours does not support it, the copied value is
+echoed at the bottom of the popup as plain text that can be mouse-selected and
+copied with `ctrl+c`. The free-text blocks of the job details popup (work dir,
+command) can also be mouse-selected directly.
 
 ## Panels
 
@@ -103,6 +139,8 @@ twine check dist/*
 
 - **Right panel (Nodes)**
   - Uses full right-column height
+  - `Enter` opens node details: state, CPU/memory/GRES allocation, features,
+    boot and slurmd start time, plus the jobs currently placed on that node
   - Node state
   - CPU total/allocated/idle
   - Memory:

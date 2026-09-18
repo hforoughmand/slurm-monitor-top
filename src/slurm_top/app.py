@@ -17,7 +17,7 @@ from textual.events import Key
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static
 
 
 @dataclass
@@ -253,6 +253,32 @@ def collect_job_info(job_id: str) -> tuple[Optional[Job], Dict[str, str], Dict[s
     return job, detail, usage
 
 
+def fetch_node_detail(node_name: str) -> Dict[str, str]:
+    """Detailed key/value fields for a node from `scontrol show node`."""
+    raw = run_cmd_argv(["scontrol", "show", "node", node_name])
+    if not raw.strip() or "not found" in raw.lower():
+        return {}
+    return _parse_scontrol_kv(raw)
+
+
+def fetch_node_jobs(node_name: str) -> List[Job]:
+    """Jobs Slurm currently places on one node (`squeue -w`)."""
+    raw = run_cmd_argv(
+        ["squeue", "-a", "-h", "-w", node_name, f"--Format={_SQUEUE_FORMAT}"]
+    )
+    jobs: List[Job] = []
+    for line in raw.strip().splitlines():
+        job = _job_from_line(line)
+        if job is not None:
+            jobs.append(job)
+    return sort_jobs(jobs)
+
+
+def collect_node_info(node_name: str) -> "tuple[Dict[str, str], List[Job]]":
+    """scontrol detail + the jobs on that node, for the node details modal."""
+    return fetch_node_detail(node_name), fetch_node_jobs(node_name)
+
+
 def parse_sinfo() -> List[Node]:
     format_str = "%n|%t|%c|%C|%m|%e|%G"
     raw = run_cmd(f"sinfo -o '{format_str}'")
@@ -485,16 +511,62 @@ def summarize_gpus(nodes: List[Node], jobs: List[Job]) -> Dict[str, object]:
     return {"total": total, "types_count": len(per_type), "per_type": per_type, "per_type_stats": per_type_stats, "active": active, "reserved": reserved, "free_est": max(0, total - active)}
 
 
-class JobsView(DataTable[str]):
+class StableTable(DataTable[str]):
+    """DataTable whose viewport survives a full rebuild.
+
+    `clear()` zeroes the scroll offset and resets the cursor, and the
+    cursor-coordinate watcher then schedules a scroll-into-view no matter what
+    `move_cursor(scroll=False)` asked for. So the saved offset has to be
+    re-applied *after* the next refresh, once the virtual size is settled and
+    those queued callbacks have run - otherwise the table snaps back to the
+    selected row every time the data refreshes.
+    """
+
+    def _view_snapshot(self) -> "tuple[float, float]":
+        return self.scroll_x, self.scroll_y
+
+    def _restore_view(self, snapshot: "tuple[float, float]", row: Optional[int] = None) -> None:
+        if row is not None and row >= 0:
+            self.move_cursor(row=row, scroll=False)
+        x, y = snapshot
+
+        def apply() -> None:
+            self.scroll_to(x=x, y=y, animate=False, force=True)
+
+        apply()
+        # Queued after the cursor watcher's own scroll callback, so this wins.
+        self.call_after_refresh(apply)
+
+    def _set_panel_title(self, text: str) -> None:
+        """Write the title onto the bordered scroll container we sit in."""
+        parent = self.parent
+        if parent is not None and hasattr(parent, "border_title"):
+            parent.border_title = text
+
+    def row_fields(self) -> "List[tuple[str, str]]":
+        """(column label, plain text) pairs for the row under the cursor."""
+        row = self.cursor_row
+        if row is None or row < 0 or row >= self.row_count:
+            return []
+        labels = [str(getattr(col, "label", "")) for col in self.columns.values()]
+        values = [cell.plain if isinstance(cell, Text) else str(cell) for cell in self.get_row_at(row)]
+        return list(zip(labels, values))
+
+
+class JobsView(StableTable):
     BINDINGS = [
         ("s", "open_sort_menu", "Sort"),
         ("d", "toggle_sort_direction", "Asc/Desc"),
         ("f", "cycle_owner_filter", "Owner"),
         ("enter", "open_details", "Details"),
     ]
-    jobs: reactive[List[Job]] = reactive([])  # type: ignore
+    # always_update: every poll must rebuild the table, so a job that appears
+    # while a filter is active is picked up even if Textual considers the new
+    # list equal to the old one.
+    jobs: reactive[List[Job]] = reactive([], always_update=True)  # type: ignore
     owner_filter: reactive[str] = reactive("all")  # type: ignore
     state_filter: reactive[str] = reactive("all")  # type: ignore
+    search_filter: reactive[str] = reactive("")  # type: ignore
     sort_key: reactive[str] = reactive("state")  # type: ignore
     sort_desc: reactive[bool] = reactive(False)  # type: ignore
     user: str = os.environ.get("USER", "")
@@ -510,13 +582,15 @@ class JobsView(DataTable[str]):
         self.add_columns("JOBID", "USER", "STATE", "PART", "NAME", "NODES", "CPUS", "GPUS", "MEM", "TIME")
         self.refresh_table()
 
-    def _build_title(self) -> str:
-        return "Slurm Jobs " f"(Enter: details, s: sort menu, d: {'desc' if self.sort_desc else 'asc'}, " f"f: owner={self.owner_filter}, state={self.state_filter})"
-
     def _update_title(self) -> None:
-        selected = self.get_selected_job()
-        hint = f" | selected {selected.job_id}: Enter opens details" if selected else ""
-        self.title = self._build_title() + hint
+        parts = [f"Jobs {len(self._display_jobs)}/{len(self.jobs)}"]
+        parts.append(f"owner={self.owner_filter}")
+        if self.state_filter != "all":
+            parts.append(f"state={self.state_filter}")
+        parts.append(f"sort={self.sort_key} {'desc' if self.sort_desc else 'asc'}")
+        if self.search_filter:
+            parts.append(f'find="{self.search_filter}"')
+        self._set_panel_title(" | ".join(parts))
 
     def _include_owner(self, job: Job) -> bool:
         if self.owner_filter == "all":
@@ -534,6 +608,17 @@ class JobsView(DataTable[str]):
         if self.state_filter == "pending":
             return st.startswith("P")
         return not st.startswith("R") and not st.startswith("P")
+
+    def _include_search(self, job: Job) -> bool:
+        """Space separated terms, all of which must appear somewhere in the row."""
+        terms = self.search_filter.lower().split()
+        if not terms:
+            return True
+        haystack = " ".join([
+            job.job_id, job.user, job.state, job.partition, job.name,
+            job.nodes, job.ncpus, job.mem, job.gpus, job.time_used, job.node_list,
+        ]).lower()
+        return all(term in haystack for term in terms)
 
     def _sort_value(self, job: Job):
         if self.sort_key == "jobid":
@@ -555,16 +640,16 @@ class JobsView(DataTable[str]):
         return job.job_id
 
     def refresh_table(self) -> None:
-        previous_scroll_x = self.scroll_x
-        previous_scroll_y = self.scroll_y
+        snapshot = self._view_snapshot()
         previous_row = self.cursor_row if self.cursor_row is not None else 0
-        selected_job_id = None
         selected = self.get_selected_job()
-        if selected:
-            selected_job_id = selected.job_id
+        selected_job_id = selected.job_id if selected else None
 
         self.clear(columns=False)
-        self._display_jobs = [j for j in self.jobs if self._include_owner(j) and self._include_state(j)]
+        self._display_jobs = [
+            j for j in self.jobs
+            if self._include_owner(j) and self._include_state(j) and self._include_search(j)
+        ]
         self._display_jobs = sorted(self._display_jobs, key=self._sort_value, reverse=self.sort_desc)
         for j in self._display_jobs:
             style = None
@@ -580,21 +665,13 @@ class JobsView(DataTable[str]):
         if not self._display_jobs:
             return
 
-        if selected_job_id:
-            for row_idx, job in enumerate(self._display_jobs):
+        row = min(max(previous_row, 0), len(self._display_jobs) - 1)
+        if selected_job_id is not None:
+            for idx, job in enumerate(self._display_jobs):
                 if job.job_id == selected_job_id:
-                    self.move_cursor(row=row_idx)
-                    self.scroll_to(x=previous_scroll_x, y=previous_scroll_y, animate=False)
-                    self._update_title()
-                    return
-
-        if previous_row is not None and previous_row >= 0:
-            self.move_cursor(row=min(previous_row, len(self._display_jobs) - 1))
-            self.scroll_to(x=previous_scroll_x, y=previous_scroll_y, animate=False)
-            self._update_title()
-            return
-        self.move_cursor(row=0)
-        self.scroll_to(x=previous_scroll_x, y=previous_scroll_y, animate=False)
+                    row = idx
+                    break
+        self._restore_view(snapshot, row)
         self._update_title()
 
     def get_selected_job(self) -> Optional[Job]:
@@ -610,6 +687,9 @@ class JobsView(DataTable[str]):
         self.refresh_table()
 
     def watch_state_filter(self, _old: str, _new: str) -> None:
+        self.refresh_table()
+
+    def watch_search_filter(self, _old: str, _new: str) -> None:
         self.refresh_table()
 
     def watch_sort_key(self, _old: str, _new: str) -> None:
@@ -634,27 +714,36 @@ class JobsView(DataTable[str]):
         self._update_title()
 
 
-class NodesView(Static):
-    can_focus = True
-    # layout=True: the panel height is auto; without a relayout on change the
-    # widget stays stuck at the height of the initial (empty) render.
-    nodes: reactive[List[Node]] = reactive([], layout=True)  # type: ignore
+class NodesView(StableTable):
+    BINDINGS = [("enter", "open_node_details", "Node details")]
+    nodes: reactive[List[Node]] = reactive([], always_update=True)  # type: ignore
+    _display_nodes: List[Node]
 
-    def render(self) -> Table:
-        table = Table(box=None, show_edge=False, pad_edge=False)
-        table.add_column("NODE", style="cyan")
-        table.add_column("STATE", style="bold")
-        table.add_column("CPUS(T)")
-        table.add_column("CPUS(alloc)")
-        table.add_column("CPUS(idle)")
-        table.add_column("MEM(total)")
-        table.add_column("MEM(resv)")
-        table.add_column("MEM(free)")
-        table.add_column("GPUs(total)")
-        for n in self.nodes:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._display_nodes = []
+
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self.add_columns(
+            "NODE", "STATE", "CPUS(T)", "CPUS(alloc)", "CPUS(idle)",
+            "MEM(total)", "MEM(resv)", "MEM(free)", "GPUs(total)",
+        )
+        self.refresh_table()
+
+    def refresh_table(self) -> None:
+        snapshot = self._view_snapshot()
+        previous_row = self.cursor_row if self.cursor_row is not None else 0
+        selected = self.get_selected_node()
+        selected_name = selected.name if selected else None
+
+        self.clear(columns=False)
+        self._display_nodes = list(self.nodes)
+        for n in self._display_nodes:
             state_style = "green" if n.state.startswith("idle") else "yellow"
-            table.add_row(
-                n.name,
+            self.add_row(
+                Text(n.name, style="cyan"),
                 Text(n.state, style=state_style),
                 n.cpus_total,
                 n.cpus_alloc,
@@ -664,12 +753,35 @@ class NodesView(Static):
                 _format_mb_human(_parse_int(n.mem_free)),
                 str(sum(_parse_gpu_inventory(n.gres).values())),
             )
-        return table
+
+        self._set_panel_title(f"Nodes {len(self._display_nodes)} (Enter: details)")
+        if not self._display_nodes:
+            return
+
+        row = min(max(previous_row, 0), len(self._display_nodes) - 1)
+        if selected_name is not None:
+            for idx, node in enumerate(self._display_nodes):
+                if node.name == selected_name:
+                    row = idx
+                    break
+        self._restore_view(snapshot, row)
+
+    def get_selected_node(self) -> Optional[Node]:
+        row = self.cursor_row
+        if row is None or row < 0 or row >= len(self._display_nodes):
+            return None
+        return self._display_nodes[row]
+
+    def watch_nodes(self, _old: List[Node], _new: List[Node]) -> None:
+        self.refresh_table()
+
+    async def action_open_node_details(self) -> None:
+        await self.app.action_open_selected_node()
 
 
-class GpuStatusView(DataTable[str]):
+class GpuStatusView(StableTable):
     BINDINGS = [("enter", "open_gpu_jobs", "GPU jobs")]
-    stats: reactive[Dict[str, object]] = reactive({})  # type: ignore
+    stats: reactive[Dict[str, object]] = reactive({}, always_update=True)  # type: ignore
     jobs: reactive[List[Job]] = reactive([])  # type: ignore
     _row_gpu_types: List[Optional[str]]
 
@@ -684,6 +796,8 @@ class GpuStatusView(DataTable[str]):
         self.refresh_table()
 
     def refresh_table(self) -> None:
+        snapshot = self._view_snapshot()
+        previous_row = self.cursor_row if self.cursor_row is not None else 0
         selected_gpu = self.get_selected_gpu_type()
         s = self.stats or {"total": 0, "types_count": 0, "per_type": {}, "active": 0, "reserved": 0, "free_est": 0}
         self.clear(columns=False)
@@ -698,14 +812,17 @@ class GpuStatusView(DataTable[str]):
                     self.add_row(gpu_type, str(stats.get("total", 0)), str(stats.get("active", 0)), str(stats.get("reserved", 0)), str(stats.get("free_est", 0)))
                     self._row_gpu_types.append(gpu_type)
 
+        self._set_panel_title("GPU status (Enter: jobs)")
         if not self._row_gpu_types:
             return
+
+        row = min(max(previous_row, 0), len(self._row_gpu_types) - 1)
         if selected_gpu:
             for idx, gpu_type in enumerate(self._row_gpu_types):
                 if gpu_type == selected_gpu:
-                    self.move_cursor(row=idx)
-                    return
-        self.move_cursor(row=0)
+                    row = idx
+                    break
+        self._restore_view(snapshot, row)
 
     def get_selected_gpu_type(self) -> Optional[str]:
         row = self.cursor_row
@@ -720,20 +837,51 @@ class GpuStatusView(DataTable[str]):
         await self.app.action_open_selected_gpu_jobs()
 
 
-class DiskUsageView(Static):
-    can_focus = True
-    # layout=True: see NodesView — auto-height panel needs a relayout on change.
-    disks: reactive[List[DiskUsage]] = reactive([], layout=True)  # type: ignore
+class DiskUsageView(StableTable):
+    disks: reactive[List[DiskUsage]] = reactive([], always_update=True)  # type: ignore
+    _display_disks: List[DiskUsage]
 
-    def render(self) -> Table:
-        table = Table(box=None, show_edge=False, pad_edge=False)
-        table.add_column("USAGE")
-        table.add_column("PATH", style="cyan")
-        table.add_column("TYPE")
-        table.add_column("SPACE")
-        for d in self.disks:
-            table.add_row(d.usage_percent, d.mount, d.fs_type, d.size)
-        return table
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._display_disks = []
+
+    def on_mount(self) -> None:
+        self.cursor_type = "row"
+        self.zebra_stripes = True
+        self.add_columns("USAGE", "PATH", "TYPE", "SPACE")
+        self.refresh_table()
+
+    def refresh_table(self) -> None:
+        snapshot = self._view_snapshot()
+        previous_row = self.cursor_row if self.cursor_row is not None else 0
+        selected = self.get_selected_disk()
+        selected_mount = selected.mount if selected else None
+
+        self.clear(columns=False)
+        self._display_disks = list(self.disks)
+        for d in self._display_disks:
+            self.add_row(d.usage_percent, Text(d.mount, style="cyan"), d.fs_type, d.size)
+
+        self._set_panel_title(f"Disks {len(self._display_disks)}")
+        if not self._display_disks:
+            return
+
+        row = min(max(previous_row, 0), len(self._display_disks) - 1)
+        if selected_mount is not None:
+            for idx, disk in enumerate(self._display_disks):
+                if disk.mount == selected_mount:
+                    row = idx
+                    break
+        self._restore_view(snapshot, row)
+
+    def get_selected_disk(self) -> Optional[DiskUsage]:
+        row = self.cursor_row
+        if row is None or row < 0 or row >= len(self._display_disks):
+            return None
+        return self._display_disks[row]
+
+    def watch_disks(self, _old: List[DiskUsage], _new: List[DiskUsage]) -> None:
+        self.refresh_table()
 
 
 class SummaryBar(Static):
@@ -769,6 +917,7 @@ class JobDetailsModal(ModalScreen[None]):
         ("r", "requeue_job", "Requeue"),
         ("f", "manual_refresh", "Refresh"),
         ("a", "toggle_auto_update", "Auto-update"),
+        ("y", "copy_job", "Copy"),
     ]
 
     AUTO_UPDATE_INTERVAL = 3.0
@@ -886,7 +1035,7 @@ class JobDetailsModal(ModalScreen[None]):
         ])
 
     def _auto_label(self) -> str:
-        return f"a Auto-update: {'ON' if self.auto_update else 'OFF'}"
+        return f"a Auto: {'ON' if self.auto_update else 'OFF'}"
 
     def compose(self) -> ComposeResult:
         # The compact block never scrolls; WkDir + Cmd share one horizontal
@@ -906,14 +1055,14 @@ class JobDetailsModal(ModalScreen[None]):
         actions.cursor_type = "cell"
         actions.zebra_stripes = False
         actions.show_header = False
-        actions.add_columns("", "", "", "", "", "", "")
+        actions.add_columns("", "", "", "", "", "", "", "")
         actions.add_row(
             "c Cancel", "h Hold", "u Release", "r Requeue",
-            "f Refresh", self._auto_label(), "Enter/Esc/q Close",
+            "f Refresh", self._auto_label(), "y Copy", "Esc Close",
         )
         actions.cursor_background_priority = "css"
         actions.cursor_foreground_priority = "css"
-        actions.move_cursor(row=0, column=6)
+        actions.move_cursor(row=0, column=7)
         self.set_focus(actions)
         self.query_one("#job-details-box", Vertical).border_title = "Job details"
         # Auto-update timer is Textual-managed (stopped on unmount); start it
@@ -998,6 +1147,9 @@ class JobDetailsModal(ModalScreen[None]):
             self.action_toggle_auto_update()
             return
         if column == 6:
+            self.action_copy_job()
+            return
+        if column == 7:
             self.dismiss()
             return
 
@@ -1009,6 +1161,29 @@ class JobDetailsModal(ModalScreen[None]):
         self.query_one("#job-details-status", Static).update(status)
         if ok:
             await self.app.refresh_data()
+
+    def action_copy_job(self) -> None:
+        """Copy picker for the fields that are awkward to retype (workdir, command)."""
+        j = self.job
+        command = self._field("Command")
+        if command == "-":
+            command = self._field("SubmitLine")
+        fields = [
+            ("JOBID", j.job_id),
+            ("USER", self._field("UserId", j.user)),
+            ("NAME", self._field("JobName", j.name)),
+            ("STATE", self._field("JobState", j.state)),
+            ("PART", self._field("Partition", j.partition)),
+            ("NODELIST", self._field("NodeList", j.node_list or "-")),
+            ("CPUS", self._field("NumCPUs", j.ncpus)),
+            ("MEM", self._field("MinMemoryNode", j.mem)),
+            ("TIME", self._field("RunTime", j.time_used)),
+            ("WORKDIR", self._field("WorkDir")),
+            ("COMMAND", command),
+            ("STDOUT", self._field("StdOut")),
+            ("STDERR", self._field("StdErr")),
+        ]
+        self.app.push_screen(CopyModal(f"job {j.job_id}", fields))
 
     async def action_cancel_job(self) -> None:
         await self._run_job_action(["scancel", self.job.job_id], "cancel")
@@ -1150,6 +1325,299 @@ class GpuJobsModal(ModalScreen[None]):
         self.set_focus(table)
 
 
+class CopyModal(ModalScreen[None]):
+    """Field picker for copying a table row to the clipboard.
+
+    DataTable disables Textual's drag-to-select (it owns the mouse for its own
+    cursor), so copying out of a panel needs an explicit route: this popup.
+    Clipboard writes go out as OSC 52, which most terminals accept over SSH;
+    where they do not, the echoed value below is a plain Static and can be
+    mouse-selected and copied with ctrl+c.
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+        ("enter", "copy_selected", "Copy field"),
+        ("a", "copy_all", "Copy whole row"),
+    ]
+
+    def __init__(self, subject: str, fields: "List[tuple[str, str]]") -> None:
+        super().__init__()
+        self.subject = subject
+        self.fields = fields
+
+    def compose(self) -> ComposeResult:
+        yield Static(
+            f"Copy from {self.subject} - Enter or click copies one field, a copies the whole row",
+            id="copy-help",
+        )
+        yield DataTable(id="copy-table")
+        yield Static("", id="copy-status")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#copy-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_columns("FIELD", "VALUE")
+        for name, value in self.fields:
+            table.add_row(name, value)
+        if not self.fields:
+            table.add_row("-", "nothing to copy")
+        table.move_cursor(row=0)
+        self.set_focus(table)
+        self._set_status("Pick a field, then Enter. Text shown here can also be mouse-selected + ctrl+c.")
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#copy-status", Static).update(text)
+
+    def _copy(self, text: str, label: str) -> None:
+        self.app.copy_to_clipboard(text)
+        self._set_status(f"Copied {label}:\n{text}")
+        self.app.notify(f"Copied {label}")
+
+    def action_copy_selected(self) -> None:
+        table = self.query_one("#copy-table", DataTable)
+        row = table.cursor_row
+        if row is None or row < 0 or row >= len(self.fields):
+            return
+        name, value = self.fields[row]
+        self._copy(value, name)
+
+    def action_copy_all(self) -> None:
+        if not self.fields:
+            return
+        self._copy("\t".join(value for _, value in self.fields), "whole row")
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "copy-table":
+            return
+        self.action_copy_selected()
+
+
+class JobSearchModal(ModalScreen[None]):
+    """Free-text filter over the jobs table, applied live as you type."""
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+    ]
+
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="search-box"):
+            yield Static("Filter jobs - every term must match somewhere in the row", id="search-help")
+            yield Input(value=self.current, placeholder="e.g. gpu pending train", id="search-input")
+            yield Static("Enter or Esc closes - an empty box shows all jobs again", id="search-hint")
+
+    def on_mount(self) -> None:
+        box = self.query_one("#search-box", Vertical)
+        box.border_title = "Search jobs"
+        field = self.query_one("#search-input", Input)
+        field.cursor_position = len(field.value)
+        self.set_focus(field)
+
+    def _apply(self, value: str) -> None:
+        app = self.app
+        if isinstance(app, SlurmHtop):
+            app.jobs_view.search_filter = value.strip()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._apply(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._apply(event.value)
+        self.dismiss()
+
+
+class NodeDetailsModal(ModalScreen[None]):
+    """`scontrol show node` detail plus the jobs Slurm placed on that node."""
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        ("q", "dismiss", "Close"),
+        ("f", "manual_refresh", "Refresh"),
+        ("c", "copy_node", "Copy"),
+    ]
+
+    _EMPTY_FIELDS = {"", "(null)", "N/A", "None", "Unknown"}
+
+    def __init__(self, node: Node) -> None:
+        super().__init__()
+        self.node = node
+        self.detail: Dict[str, str] = {}
+        self.node_jobs: List[Job] = []
+
+    @staticmethod
+    def _state_style(state: str) -> str:
+        s = state.lower()
+        if s.startswith("idle"):
+            return "bold green"
+        if s.startswith(("alloc", "mix", "comp", "resv")):
+            return "bold yellow"
+        if s.startswith(("down", "drain", "drng", "fail", "err", "inval", "unk", "maint")):
+            return "bold red"
+        return "bold"
+
+    def _field(self, key: str, default: str = "-") -> str:
+        value = (self.detail.get(key) or "").strip()
+        return default if value in self._EMPTY_FIELDS else value
+
+    def _main_text(self) -> Text:
+        n = self.node
+        gd = self._field
+        dim = "dim"
+        state = gd("State", n.state)
+        running = sum(1 for j in self.node_jobs if j.state.upper().startswith("R"))
+        pending = len(self.node_jobs) - running
+
+        rows = [
+            Text.assemble(
+                ("Node   ", dim), (n.name, "bold"),
+                "    ", (state, self._state_style(state)),
+                "    ", ("Reason ", dim), gd("Reason"),
+            ),
+            Text.assemble(
+                ("CPUs   ", dim), f"{gd('CPUAlloc', n.cpus_alloc)} alloc / {gd('CPUTot', n.cpus_total)} total",
+                "    ", ("idle ", dim), n.cpus_idle or "-",
+                "    ", ("load ", dim), gd("CPULoad"),
+            ),
+            Text.assemble(
+                ("Memory ", dim), f"{_human_mem(gd('AllocMem'))} alloc / {_human_mem(gd('RealMemory', n.mem_total))} total",
+                "    ", ("free ", dim), _human_mem(gd("FreeMem", n.mem_free)),
+                "    ", ("tmp ", dim), _human_mem(gd("TmpDisk")),
+            ),
+            Text.assemble(
+                ("GRES   ", dim), gd("Gres", n.gres or "-"),
+                "    ", ("used ", dim), gd("GresUsed"),
+            ),
+            Text.assemble(
+                ("Part   ", dim), gd("Partitions"),
+                "    ", ("weight ", dim), gd("Weight"),
+                "    ", ("sockets ", dim), gd("Sockets"),
+                "    ", ("threads ", dim), gd("ThreadsPerCore"),
+            ),
+            Text.assemble(
+                ("Feat   ", dim), gd("AvailableFeatures"),
+                "    ", ("active ", dim), gd("ActiveFeatures"),
+            ),
+            Text.assemble(
+                ("Uptime ", dim), ("boot ", dim), _short_time(self.detail.get("BootTime")),
+                "    ", ("slurmd ", dim), _short_time(self.detail.get("SlurmdStartTime")),
+                "    ", ("ver ", dim), gd("Version"),
+            ),
+            Text.assemble(
+                ("Jobs   ", dim), f"{len(self.node_jobs)} here",
+                "    ", ("running ", dim), str(running),
+                "    ", ("pending ", dim), str(pending),
+            ),
+        ]
+        alloc_tres = gd("AllocTRES")
+        if alloc_tres != "-":
+            rows.append(Text.assemble(("TRES   ", dim), alloc_tres))
+        return Text("\n").join(rows)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="node-details-box"):
+            yield Static(self._main_text(), id="node-details-body")
+        yield DataTable(id="node-jobs")
+        yield Static("Status: loading...", id="node-details-status")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#node-jobs", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_columns("JOBID", "USER", "STATE", "PART", "NAME", "CPUS", "GPUS", "MEM", "TIME")
+        table.border_title = "Jobs on this node (Enter: job details)"
+        self.set_focus(table)
+        self.query_one("#node-details-box", Vertical).border_title = f"Node {self.node.name}"
+        self._request_refresh("opened")
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#node-details-status", Static).update(text)
+
+    def _refresh_body(self) -> None:
+        self.query_one("#node-details-body", Static).update(self._main_text())
+        table = self.query_one("#node-jobs", DataTable)
+        selected = self._selected_job()
+        selected_id = selected.job_id if selected else None
+        table.clear(columns=False)
+        for j in self.node_jobs:
+            style = None
+            if j.state.upper().startswith("R"):
+                style = "green"
+            elif j.state.upper().startswith("P"):
+                style = "yellow"
+            table.add_row(
+                j.job_id, j.user, Text(j.state, style=style), j.partition, j.name,
+                j.ncpus, str(_parse_gpu_count(j.gpus)), j.mem, j.time_used,
+            )
+        if not self.node_jobs:
+            table.add_row("-", "-", "-", "-", "no jobs on this node", "-", "-", "-", "-")
+            return
+        row = 0
+        if selected_id is not None:
+            for idx, job in enumerate(self.node_jobs):
+                if job.job_id == selected_id:
+                    row = idx
+                    break
+        table.move_cursor(row=row)
+
+    def _selected_job(self) -> Optional[Job]:
+        table = self.query_one("#node-jobs", DataTable)
+        row = table.cursor_row
+        if row is None or row < 0 or row >= len(self.node_jobs):
+            return None
+        return self.node_jobs[row]
+
+    def _request_refresh(self, source: str) -> None:
+        self.run_worker(
+            self._do_refresh(source), group="node-detail-refresh", exclusive=True
+        )
+
+    async def _do_refresh(self, source: str) -> None:
+        detail, jobs = await asyncio.to_thread(collect_node_info, self.node.name)
+        if not self.is_mounted:
+            return
+        stamp = time.strftime("%H:%M:%S")
+        self.detail = detail
+        self.node_jobs = jobs
+        self._refresh_body()
+        if not detail:
+            self._set_status(f"Status: scontrol returned nothing for {self.node.name} - checked {stamp}")
+            return
+        self._set_status(
+            f"Status: updated ({source}) at {stamp} - Enter opens a job, f refreshes, c copies"
+        )
+
+    def action_manual_refresh(self) -> None:
+        self._request_refresh("manual")
+
+    def action_copy_node(self) -> None:
+        n = self.node
+        fields = [
+            ("NODE", n.name),
+            ("STATE", self._field("State", n.state)),
+            ("CPUS", f"{self._field('CPUAlloc', n.cpus_alloc)}/{self._field('CPUTot', n.cpus_total)}"),
+            ("MEM(total)", self._field("RealMemory", n.mem_total)),
+            ("MEM(free)", self._field("FreeMem", n.mem_free)),
+            ("GRES", self._field("Gres", n.gres or "-")),
+            ("GRES(used)", self._field("GresUsed")),
+            ("PARTITIONS", self._field("Partitions")),
+        ]
+        self.app.push_screen(CopyModal(f"node {n.name}", fields))
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "node-jobs":
+            return
+        job = self._selected_job()
+        if job is None:
+            return
+        await self.app.push_screen(JobDetailsModal(job))
+
+
 class SlurmHtop(App):
     TITLE = "slurm-top"
     CSS = """
@@ -1171,7 +1639,7 @@ class SlurmHtop(App):
         scrollbar-background-hover: $surface;
         scrollbar-background-active: $surface;
     }
-    #jobs, #gpu-status {
+    #jobs, #nodes, #gpu-status, #disk-usage {
         scrollbar-size-vertical: 1;
         scrollbar-size-horizontal: 1;
         scrollbar-color: $panel-darken-1;
@@ -1186,8 +1654,11 @@ class SlurmHtop(App):
     #summary {
         content-align: center middle;
     }
-    #nodes { height: auto; }
-    #disk-usage { height: auto; }
+    /* NodesView/DiskUsageView are DataTables: height:auto would clip rows
+       and collapse virtual_size (see the GPU note below), so they fill the
+       viewport and scroll their own rows. */
+    #nodes { height: 1fr; }
+    #disk-usage { height: 1fr; }
     /* GpuStatusView is a DataTable: with height:auto a short panel clips
        trailing rows AND collapses virtual_size, hiding GPU types with no
        scrollbar. Fill the scroll viewport so the table scrolls its rows. */
@@ -1203,6 +1674,15 @@ class SlurmHtop(App):
         align: center middle;
     }
     GpuJobsModal {
+        align: center middle;
+    }
+    NodeDetailsModal {
+        align: center middle;
+    }
+    CopyModal {
+        align: center middle;
+    }
+    JobSearchModal {
         align: center middle;
     }
     #job-details-box {
@@ -1268,6 +1748,75 @@ class SlurmHtop(App):
         padding: 0 1;
         content-align: center middle;
     }
+    #node-details-box {
+        width: 104;
+        height: auto;
+        max-height: 60%;
+        border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
+        padding: 1 2;
+        background: $surface;
+    }
+    #node-details-body {
+        width: 1fr;
+        height: auto;
+    }
+    #node-jobs {
+        width: 104;
+        height: 12;
+        border: round $boost;
+        background: $surface;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+    }
+    #node-jobs:focus {
+        border: round $accent;
+    }
+    #node-details-status {
+        width: 104;
+        border: round $boost;
+        padding: 0 2;
+        background: $surface;
+    }
+    #copy-help {
+        width: 90;
+        border: round $panel;
+        padding: 0 1;
+    }
+    #copy-table {
+        width: 90;
+        height: 14;
+        border: round $accent;
+        background: $surface;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+    }
+    #copy-status {
+        width: 90;
+        height: auto;
+        border: round $boost;
+        padding: 0 1;
+        background: $surface;
+    }
+    #search-box {
+        width: 72;
+        height: auto;
+        border: round $accent;
+        border-title-color: $accent;
+        border-title-style: bold;
+        padding: 1 2;
+        background: $surface;
+    }
+    #search-help, #search-hint {
+        width: 1fr;
+        height: auto;
+        color: $text-muted;
+    }
+    #search-input {
+        width: 1fr;
+        margin: 1 0;
+    }
     #gpu-jobs-table {
         width: 130;
         height: 20;
@@ -1286,6 +1835,8 @@ class SlurmHtop(App):
         ("s", "open_sort_picker", "Sort"),
         ("d", "toggle_sort_direction", "Asc/Desc"),
         ("f", "cycle_owner_filter", "Owner"),
+        ("slash", "open_search", "Find"),
+        ("c", "copy_selection", "Copy"),
         ("alt+left", "shrink_focused_panel", "Pane-"),
         ("alt+right", "grow_focused_panel", "Pane+"),
         ("0", "reset_layout", "Reset"),
@@ -1330,10 +1881,8 @@ class SlurmHtop(App):
     async def on_mount(self) -> None:
         self.set_focus(self.jobs_view)
         self._apply_layout_ratios()
-        self.query_one("#jobs-scroll", VerticalScroll).border_title = "Jobs"
-        self.query_one("#nodes-scroll", VerticalScroll).border_title = "Nodes"
-        self.query_one("#gpu-scroll", VerticalScroll).border_title = "GPU status"
-        self.query_one("#disk-scroll", VerticalScroll).border_title = "Disks"
+        # Jobs/Nodes/GPU/Disks write their own border titles (they carry live
+        # counts and the active filters); only the static panel needs one here.
         self.query_one("#summary-scroll", VerticalScroll).border_title = "Job statistics (jobs / GPUs / CPUs / MEM)"
         # Textual-managed timer (stopped automatically on shutdown) instead of a
         # raw asyncio task; the refresh itself runs in a worker.
@@ -1458,6 +2007,60 @@ class SlurmHtop(App):
             self.notify("No job selected")
             return
         await self.push_screen(JobDetailsModal(selected_job))
+
+    async def action_open_search(self) -> None:
+        await self.push_screen(JobSearchModal(self.jobs_view.search_filter))
+
+    async def action_open_selected_node(self) -> None:
+        node = self.nodes_view.get_selected_node()
+        if not node:
+            self.notify("Select a node row first")
+            return
+        await self.push_screen(NodeDetailsModal(node))
+
+    def _summary_fields(self) -> "List[tuple[str, str]]":
+        fields: List[tuple[str, str]] = []
+        summary = self.summary_bar.summary or {}
+        for bucket in ("all", "me", "others"):
+            for state in ("running", "pending"):
+                data = summary.get(bucket, {}).get(state, {})
+                fields.append((
+                    f"{bucket} {state}",
+                    f"{data.get('jobs', 0)} jobs / {data.get('gpus', 0)} GPUs / "
+                    f"{data.get('cpus', 0)} CPUs / {_format_mb_human(data.get('mem_mb', 0))}",
+                ))
+        return fields
+
+    def _copy_fields_for_panel(self) -> "tuple[str, List[tuple[str, str]]]":
+        panel = self._focused_panel()
+        if panel == "jobs":
+            job = self.jobs_view.get_selected_job()
+            fields = self.jobs_view.row_fields()
+            if job is not None:
+                # Columns the table has no room for, but that you often want.
+                fields += [("NODELIST", job.node_list), ("TRES", job.gpus)]
+            return (f"job {job.job_id}" if job else "jobs"), fields
+        if panel == "nodes":
+            node = self.nodes_view.get_selected_node()
+            fields = self.nodes_view.row_fields()
+            if node is not None:
+                fields.append(("GRES", node.gres))
+            return (f"node {node.name}" if node else "nodes"), fields
+        if panel == "gpu":
+            return "GPU status", self.gpu_status_view.row_fields()
+        if panel == "disk":
+            return "disks", self.disk_usage_view.row_fields()
+        return "job statistics", self._summary_fields()
+
+    def action_copy_selection(self) -> None:
+        if len(self.screen_stack) > 1:
+            self.notify("Copy works on the main panels - close this popup first")
+            return
+        subject, fields = self._copy_fields_for_panel()
+        if not fields:
+            self.notify("Nothing selected to copy")
+            return
+        self.push_screen(CopyModal(subject, fields))
 
     async def action_open_selected_gpu_jobs(self) -> None:
         gpu_type = self.gpu_status_view.get_selected_gpu_type()
