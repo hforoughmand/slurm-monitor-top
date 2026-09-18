@@ -28,6 +28,9 @@ A terminal dashboard for Slurm clusters, inspired by `htop`.
   - active GPUs (running jobs)
   - reserved GPUs (pending jobs)
 - Auto refresh every 3 seconds that keeps your scroll position and selection
+- JSON output (`slurm-top --json`) for other front ends
+- A [VS Code extension](vscode-extension/) with the same panels, in the sidebar
+  or a full editor tab
 
 ## Requirements
 
@@ -70,6 +73,66 @@ You can still run it directly during development:
 ```bash
 python stop.py
 ```
+
+## JSON output
+
+`--json` prints the same numbers the TUI renders, for scripts and other front
+ends (the VS Code extension uses it). Parsing lives in `slurm_top.data`, which
+imports nothing outside the standard library, so this mode works in an
+interpreter without `textual` installed.
+
+```bash
+slurm-top --json                  # one snapshot, then exit
+slurm-top --json --pretty         # ... indented
+slurm-top --json --watch 3        # one snapshot per line, every 3 seconds
+slurm-top --json --job 1234       # scontrol/sstat details for one job
+slurm-top --json --node node01    # scontrol details plus the jobs placed there
+```
+
+A snapshot holds `jobs`, `nodes`, `disks`, the `gpu` and `summary` aggregates,
+and the `user`, `host`, `timestamp` and `schema` it was taken with. Every row
+carries derived fields so a consumer never has to re-parse a TRES, GRES or
+size string:
+
+- jobs — `gpu_count`, `gpu_types`, `cpu_count`, `mem_mb`
+- nodes — `cpus_alloc_n`, `mem_free_mb` / `mem_free_human`, `gpu_total`,
+  `gpu_used`, `gpu_free`, `gpu_inventory`, `cpu_load_n`, `cpu_load_ratio`,
+  plus the `partition` and drain `reason` from `sinfo`
+- disks — `usage_pct`, `size_mb`, `used_mb`, `avail_mb`
+
+Allocated GPUs per node come from a second `sinfo -O GresUsed` call, because
+`sinfo -o %G` only reports what a machine *has*, never what is handed out.
+
+## VS Code extension
+
+[`vscode-extension/`](vscode-extension/) ships the same dashboard for VS Code,
+in two sizes: a compact activity-bar view, and a full editor tab laid out like
+the terminal UI. It runs `slurm-top --json --watch` in the background, so both
+share one collector and one parser with the TUI.
+
+Job and machine details open as a dialog over the editor rather than as another
+tab, and the extension carries its own copy of the collector, so installing the
+Python package is optional for extension users.
+
+```bash
+cd vscode-extension
+npm install && npm run package    # produces a .vsix
+```
+
+Install the `.vsix` with **Extensions: Install from VSIX…**, then reload the
+window. Under **Remote - SSH** install it on the remote host, where `squeue`
+lives. See [vscode-extension/README.md](vscode-extension/README.md) for
+settings, publishing and development notes.
+
+## Tests
+
+```bash
+python tests/smoke.py          # data layer, JSON export, CLI and TUI
+cd vscode-extension && npm test  # extension host and webview
+```
+
+Both talk to the real cluster, so they need `squeue` and `sinfo` on `PATH`, and
+they assert invariants rather than specific numbers.
 
 ## Build Package
 

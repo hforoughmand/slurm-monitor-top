@@ -1,0 +1,203 @@
+{
+  "name": "slurm-monitor-top",
+  "displayName": "Slurm Monitor (slurm-top)",
+  "description": "htop-style live view of Slurm jobs, nodes, GPUs and disks, in the sidebar or a full editor tab.",
+  "version": "0.5.0",
+  "license": "MIT",
+  "publisher": "hforoughmand",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1f2430",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hforoughmand/slurm-monitor-top.git",
+    "directory": "vscode-extension"
+  },
+  "homepage": "https://github.com/hforoughmand/slurm-monitor-top#readme",
+  "bugs": {
+    "url": "https://github.com/hforoughmand/slurm-monitor-top/issues"
+  },
+  "qna": "marketplace",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "slurm",
+    "hpc",
+    "squeue",
+    "sinfo",
+    "cluster"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "slurmTop",
+          "title": "Slurm",
+          "icon": "media/slurm.svg"
+        }
+      ]
+    },
+    "views": {
+      "slurmTop": [
+        {
+          "type": "webview",
+          "id": "slurmTop.sidebar",
+          "name": "Cluster",
+          "icon": "media/slurm.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "slurmTop.openDashboard",
+        "title": "Slurm: Open Dashboard",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "slurmTop.refresh",
+        "title": "Slurm: Refresh Now",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "slurmTop.restart",
+        "title": "Slurm: Restart Data Collector"
+      },
+      {
+        "command": "slurmTop.showOutput",
+        "title": "Slurm: Show Extension Log"
+      },
+      {
+        "command": "slurmTop.openTerminalTui",
+        "title": "Slurm: Open Terminal Dashboard (slurm-top)"
+      },
+      {
+        "command": "slurmTop.openJobDetails",
+        "title": "Slurm: Show Job Details\u2026"
+      },
+      {
+        "command": "slurmTop.openNodeDetails",
+        "title": "Slurm: Show Node Details\u2026"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "slurmTop.openDashboard",
+          "when": "view == slurmTop.sidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "slurmTop.refresh",
+          "when": "view == slurmTop.sidebar",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Slurm Monitor",
+      "properties": {
+        "slurmTop.pythonPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Python interpreter used to run the data collector. Empty means: try `python3`, then `python`. Ignored when `#slurmTop.command#` is set."
+        },
+        "slurmTop.command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Full command that emits slurm-top JSON, as an argv array (for example `[\"ssh\", \"login01\", \"slurm-top\", \"--json\"]`). Data-mode flags such as `--watch` are appended. Empty means auto-detect."
+        },
+        "slurmTop.refreshInterval": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 600,
+          "description": "Seconds between cluster refreshes."
+        },
+        "slurmTop.pauseWhenHidden": {
+          "type": "boolean",
+          "default": true,
+          "description": "Stop polling the cluster while no Slurm view is visible."
+        },
+        "slurmTop.sidebarSections": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "jobs",
+              "nodes",
+              "gpus",
+              "disks"
+            ]
+          },
+          "default": [
+            "summary",
+            "jobs",
+            "nodes",
+            "gpus",
+            "disks"
+          ],
+          "description": "Sections shown in the narrow sidebar view, in order. Panels there can be collapsed by clicking their header. The dashboard always shows all of them."
+        },
+        "slurmTop.defaultOwnerFilter": {
+          "type": "string",
+          "enum": [
+            "all",
+            "me",
+            "others"
+          ],
+          "default": "me",
+          "description": "Which jobs the sidebar shows on open."
+        },
+        "slurmTop.detailsIn": {
+          "type": "string",
+          "enum": [
+            "window",
+            "popup",
+            "card",
+            "tab",
+            "overlay"
+          ],
+          "enumDescriptions": [
+            "A floating window of its own, like Settings moved out of the main window: resizable, movable, and can sit on a second monitor.",
+            "A floating list over the editor, like the command palette: type to filter the fields, Enter to copy one, Escape to dismiss.",
+            "A card centred in an editor tab, dimming the rest of that tab.",
+            "A plain editor tab beside your code, which stays open while you work.",
+            "A panel inside the Slurm view you clicked in."
+          ],
+          "default": "window",
+          "markdownDescription": "Where job and machine details open. `window` needs VS Code 1.85 or later and falls back to `tab` on older builds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "sync-python": "node scripts/sync-python.js",
+    "compile": "npm run sync-python && tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "npm run compile && npx @vscode/vsce package",
+    "test": "npm run compile && node test/webview.smoke.js && node test/quickpick.smoke.js && node test/detail.smoke.js && node test/host.smoke.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.75.0",
+    "jsdom": "^24.0.0",
+    "typescript": "^5.4.0"
+  }
+}

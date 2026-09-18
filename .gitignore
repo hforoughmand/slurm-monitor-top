@@ -17,6 +17,8 @@ build/
 # IDE / OS
 .idea/
 .vscode/
+# ... except the extension's own launch/build config, which is part of it
+!vscode-extension/.vscode/
 *.swp
 .DS_Store
 

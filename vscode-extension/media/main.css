@@ -1,0 +1,483 @@
+:root {
+  --row-height: 20px;
+  --gap: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- status */
+
+.status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 0.9em;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.status.hidden {
+  display: none;
+}
+
+.status.error {
+  color: var(--vscode-inputValidation-errorForeground, var(--vscode-errorForeground));
+  background: var(--vscode-inputValidation-errorBackground);
+  border-bottom-color: var(--vscode-inputValidation-errorBorder);
+}
+
+.status button {
+  margin-left: auto;
+}
+
+/* ----------------------------------------------------------------- layout */
+
+#root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--gap);
+  overflow: hidden;
+}
+
+/* Dashboard: jobs and nodes side by side, GPUs and disks underneath, which is
+   the arrangement the terminal UI uses. */
+#root.dashboard {
+  display: grid;
+  gap: var(--gap);
+  grid-template-columns: 3fr 2fr;
+  grid-template-rows: auto minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-areas:
+    'summary summary'
+    'jobs    nodes'
+    'gpus    disks';
+}
+
+#root.dashboard > [data-section='summary'] { grid-area: summary; }
+#root.dashboard > [data-section='jobs']    { grid-area: jobs; }
+#root.dashboard > [data-section='nodes']   { grid-area: nodes; }
+#root.dashboard > [data-section='gpus']    { grid-area: gpus; }
+#root.dashboard > [data-section='disks']   { grid-area: disks; }
+
+/* One column is too narrow for a grid; stack and let each panel scroll. */
+@media (max-width: 720px) {
+  #root.dashboard {
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+#root.sidebar {
+  overflow-y: auto;
+  gap: 10px;
+}
+
+#root.sidebar .panel {
+  flex: 0 0 auto;
+  max-height: 55vh;
+}
+
+/* Five stacked panels only fit a narrow column if they fold. */
+#root.sidebar .panel.collapsed {
+  max-height: none;
+}
+
+.panel.collapsed .panel-body,
+.panel.collapsed .panel-head > select,
+.panel.collapsed .panel-head > input {
+  display: none;
+}
+
+.panel-title.collapsible {
+  cursor: pointer;
+}
+
+.panel-title.collapsible::before {
+  content: '▾ ';
+  display: inline-block;
+  opacity: 0.7;
+}
+
+.panel.collapsed .panel-title.collapsible::before {
+  content: '▸ ';
+}
+
+/* The detail tab is one panel filling the editor. */
+#root.detail {
+  display: block;
+  overflow: hidden;
+}
+
+#root.detail > .panel {
+  height: 100%;
+}
+
+/* The modal presentation: a centred card on a dimmed backdrop. The webview
+   cannot paint outside its own frame, so the scrim covers the editor area it
+   occupies -- the sidebar and activity bar stay lit. */
+#root.modal {
+  display: block;
+  overflow: hidden;
+  padding: 0;
+}
+
+.scrim {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+
+.scrim > .panel {
+  width: min(980px, 100%);
+  max-height: 100%;
+  cursor: default;
+  border-radius: 6px;
+  border-color: var(--vscode-widget-border, var(--vscode-panel-border));
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  outline: none;
+}
+
+/* Two columns of scontrol fields once the card is wide enough for them. */
+@media (min-width: 900px) {
+  #root.detail .kv,
+  .scrim .kv {
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+  }
+}
+
+/* ----------------------------------------------------------------- panels */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+}
+
+.panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: var(--vscode-editorGroupHeader-tabsBackground, transparent);
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.panel-title {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.04em;
+}
+
+.panel-count {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+.panel-head .spacer {
+  flex: 1 1 auto;
+}
+
+.panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ----------------------------------------------------------------- tables */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--vscode-editor-font-family);
+  font-size: calc(var(--vscode-font-size) - 1px);
+  white-space: nowrap;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  text-align: left;
+  font-weight: 600;
+  padding: 2px 6px;
+  background: var(--vscode-editorGroupHeader-tabsBackground, var(--vscode-editor-background));
+  border-bottom: 1px solid var(--vscode-panel-border);
+  cursor: pointer;
+  user-select: none;
+}
+
+thead th.numeric,
+tbody td.numeric {
+  text-align: right;
+}
+
+thead th[aria-sort]::after {
+  content: ' ▾';
+  opacity: 0.8;
+}
+
+thead th[aria-sort='ascending']::after {
+  content: ' ▴';
+}
+
+tbody td {
+  padding: 1px 6px;
+  height: var(--row-height);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 28ch;
+}
+
+tbody tr {
+  cursor: default;
+}
+
+tbody tr:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+tbody tr.selected {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+tbody tr.mine td:first-child {
+  box-shadow: inset 2px 0 0 var(--vscode-textLink-foreground);
+}
+
+.empty {
+  padding: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+/* ------------------------------------------------------------ state colors */
+
+.state-running { color: var(--vscode-charts-green, #4caf50); }
+.state-pending { color: var(--vscode-charts-yellow, #d6a72c); }
+.state-failed  { color: var(--vscode-charts-red, #f14c4c); }
+.state-other   { color: var(--vscode-descriptionForeground); }
+
+tbody tr.selected .state-running,
+tbody tr.selected .state-pending,
+tbody tr.selected .state-failed,
+tbody tr.selected .state-other {
+  color: inherit;
+}
+
+/* ------------------------------------------------------------------- bars */
+
+.bar {
+  position: relative;
+  min-width: 56px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--vscode-progressBar-background, rgba(128, 128, 128, 0.25));
+  opacity: 0.35;
+}
+
+.bar > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--vscode-charts-blue, #3794ff);
+}
+
+.bar.warn > span { background: var(--vscode-charts-yellow, #d6a72c); }
+.bar.high > span { background: var(--vscode-charts-red, #f14c4c); }
+
+td.with-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---------------------------------------------------------------- summary */
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  gap: 0 10px;
+  padding: 6px 8px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: calc(var(--vscode-font-size) - 1px);
+}
+
+#root.sidebar .summary-grid {
+  grid-template-columns: auto repeat(4, minmax(0, 1fr));
+  font-size: calc(var(--vscode-font-size) - 2px);
+  gap: 0 6px;
+}
+
+.summary-grid .head {
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.85em;
+}
+
+.summary-grid .label {
+  color: var(--vscode-descriptionForeground);
+  text-transform: capitalize;
+}
+
+.summary-grid .value {
+  text-align: right;
+}
+
+/* --------------------------------------------------------------- controls */
+
+select,
+input[type='search'],
+button {
+  font-family: inherit;
+  font-size: calc(var(--vscode-font-size) - 1px);
+  color: var(--vscode-input-foreground, var(--vscode-foreground));
+  background: var(--vscode-input-background, transparent);
+  border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+button {
+  cursor: pointer;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
+}
+
+input[type='search'] {
+  min-width: 6ch;
+  flex: 1 1 8ch;
+  max-width: 24ch;
+}
+
+/* ---------------------------------------------------------------- overlay */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.overlay-card {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 100%);
+  max-height: 100%;
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 5px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.overlay-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-weight: 600;
+}
+
+.overlay-head .spacer {
+  flex: 1 1 auto;
+}
+
+.overlay-body {
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 12px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: calc(var(--vscode-font-size) - 1px);
+}
+
+.kv dt {
+  color: var(--vscode-descriptionForeground);
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.overlay-body h3 {
+  margin: 12px 0 4px;
+  font-size: 0.9em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--vscode-descriptionForeground);
+}
+
+.overlay-body h3:first-child {
+  margin-top: 0;
+}
+
+.hint {
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.85em;
+}
+
+td.link {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+td.link:hover {
+  color: var(--vscode-textLink-activeForeground);
+}
+
+

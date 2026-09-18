@@ -1,0 +1,291 @@
+{
+  "schema": 1,
+  "timestamp": 1758200000.0,
+  "user": "alice",
+  "host": "login01",
+  "jobs": [
+    {
+      "job_id": "1001",
+      "user": "alice",
+      "state": "RUNNING",
+      "partition": "gpu",
+      "name": "train-a",
+      "nodes": "1",
+      "ncpus": "16",
+      "mem": "64G",
+      "gpus": "cpu=16,mem=64G,node=1,gres/gpu:a100=2",
+      "time_used": "2:11:04",
+      "node_list": "gpu01",
+      "gpu_count": 2,
+      "gpu_types": {
+        "a100": 2
+      },
+      "cpu_count": 16,
+      "mem_mb": 65536
+    },
+    {
+      "job_id": "1002",
+      "user": "bob",
+      "state": "RUNNING",
+      "partition": "cpu",
+      "name": "assemble",
+      "nodes": "2",
+      "ncpus": "64",
+      "mem": "256G",
+      "gpus": "cpu=64,mem=256G,node=2",
+      "time_used": "1-04:00:12",
+      "node_list": "cpu[01-02]",
+      "gpu_count": 0,
+      "gpu_types": {},
+      "cpu_count": 64,
+      "mem_mb": 262144
+    },
+    {
+      "job_id": "1003",
+      "user": "alice",
+      "state": "PENDING",
+      "partition": "gpu",
+      "name": "train-b",
+      "nodes": "1",
+      "ncpus": "8",
+      "mem": "32G",
+      "gpus": "cpu=8,mem=32G,node=1,gres/gpu:v100=1",
+      "time_used": "0:00",
+      "node_list": "",
+      "gpu_count": 1,
+      "gpu_types": {
+        "v100": 1
+      },
+      "cpu_count": 8,
+      "mem_mb": 32768
+    },
+    {
+      "job_id": "1004",
+      "user": "carol",
+      "state": "COMPLETING",
+      "partition": "cpu",
+      "name": "postproc",
+      "nodes": "1",
+      "ncpus": "4",
+      "mem": "8G",
+      "gpus": "cpu=4,mem=8G,node=1",
+      "time_used": "0:31:20",
+      "node_list": "cpu03",
+      "gpu_count": 0,
+      "gpu_types": {},
+      "cpu_count": 4,
+      "mem_mb": 8192
+    }
+  ],
+  "nodes": [
+    {
+      "name": "gpu01",
+      "state": "mixed",
+      "cpus_total": "64",
+      "cpus_alloc": "16",
+      "cpus_idle": "48",
+      "mem_total": "515000",
+      "mem_reserved": "65536",
+      "mem_free": "449464",
+      "gres": "gpu:a100:4(S:0-1)",
+      "cpus_total_n": 64,
+      "cpus_alloc_n": 16,
+      "cpus_idle_n": 48,
+      "mem_total_mb": 515000,
+      "mem_total_human": "502.9G",
+      "mem_reserved_mb": 65536,
+      "mem_reserved_human": "64.0G",
+      "mem_free_mb": 449464,
+      "mem_free_human": "439.0G",
+      "gpu_inventory": {
+        "a100": 4
+      },
+      "partition": "gpu*",
+      "cpu_load": "12.40",
+      "reason": "",
+      "gres_used": "gpu:a100:2(IDX:0-1)",
+      "gpu_allocated": {
+        "a100": 2
+      },
+      "gpu_total": 4,
+      "gpu_used": 2,
+      "gpu_free": 2,
+      "gpu_types": [
+        "a100"
+      ],
+      "cpu_load_n": 12.4,
+      "cpu_load_ratio": 0.19375
+    },
+    {
+      "name": "cpu01",
+      "state": "allocated",
+      "cpus_total": "128",
+      "cpus_alloc": "128",
+      "cpus_idle": "0",
+      "mem_total": "1018896",
+      "mem_reserved": "262144",
+      "mem_free": "756752",
+      "gres": "",
+      "cpus_total_n": 128,
+      "cpus_alloc_n": 128,
+      "cpus_idle_n": 0,
+      "mem_total_mb": 1018896,
+      "mem_total_human": "995.0G",
+      "mem_reserved_mb": 262144,
+      "mem_reserved_human": "256.0G",
+      "mem_free_mb": 756752,
+      "mem_free_human": "739.0G",
+      "gpu_inventory": {},
+      "partition": "cpu",
+      "cpu_load": "127.10",
+      "reason": "",
+      "gres_used": "",
+      "gpu_allocated": {},
+      "gpu_total": 0,
+      "gpu_used": 0,
+      "gpu_free": 0,
+      "gpu_types": [],
+      "cpu_load_n": 127.1,
+      "cpu_load_ratio": 0.99296875
+    },
+    {
+      "name": "cpu03",
+      "state": "drain",
+      "cpus_total": "128",
+      "cpus_alloc": "4",
+      "cpus_idle": "124",
+      "mem_total": "1018896",
+      "mem_reserved": "8192",
+      "mem_free": "1010704",
+      "gres": "",
+      "cpus_total_n": 128,
+      "cpus_alloc_n": 4,
+      "cpus_idle_n": 124,
+      "mem_total_mb": 1018896,
+      "mem_total_human": "995.0G",
+      "mem_reserved_mb": 8192,
+      "mem_reserved_human": "8.0G",
+      "mem_free_mb": 1010704,
+      "mem_free_human": "986.6G",
+      "gpu_inventory": {},
+      "partition": "cpu",
+      "cpu_load": "3.90",
+      "reason": "disk full",
+      "gres_used": "",
+      "gpu_allocated": {},
+      "gpu_total": 0,
+      "gpu_used": 0,
+      "gpu_free": 0,
+      "gpu_types": [],
+      "cpu_load_n": 3.9,
+      "cpu_load_ratio": 0.03046875
+    }
+  ],
+  "disks": [
+    {
+      "usage_percent": "91%",
+      "mount": "/home",
+      "fs_type": "nfs",
+      "size": "20T",
+      "used": "18T",
+      "avail": "2T",
+      "usage_pct": 91,
+      "size_mb": 20971520,
+      "used_mb": 18874368,
+      "avail_mb": 2097152
+    },
+    {
+      "usage_percent": "43%",
+      "mount": "/scratch",
+      "fs_type": "lustre",
+      "size": "500T",
+      "used": "215T",
+      "avail": "285T",
+      "usage_pct": 43,
+      "size_mb": 524288000,
+      "used_mb": 225443840,
+      "avail_mb": 298844160
+    },
+    {
+      "usage_percent": "12%",
+      "mount": "/",
+      "fs_type": "xfs",
+      "size": "200G",
+      "used": "24G",
+      "avail": "176G",
+      "usage_pct": 12,
+      "size_mb": 204800,
+      "used_mb": 24576,
+      "avail_mb": 180224
+    }
+  ],
+  "gpu": {
+    "total": 6,
+    "types_count": 2,
+    "per_type": {
+      "a100": 4,
+      "v100": 2
+    },
+    "per_type_stats": {
+      "a100": {
+        "total": 4,
+        "active": 2,
+        "reserved": 0,
+        "free_est": 2
+      },
+      "v100": {
+        "total": 2,
+        "active": 0,
+        "reserved": 1,
+        "free_est": 2
+      }
+    },
+    "active": 2,
+    "reserved": 1,
+    "free_est": 4
+  },
+  "summary": {
+    "all": {
+      "running": {
+        "jobs": 2,
+        "cpus": 80,
+        "mem_mb": 327680,
+        "gpus": 2
+      },
+      "pending": {
+        "jobs": 1,
+        "cpus": 8,
+        "mem_mb": 32768,
+        "gpus": 1
+      }
+    },
+    "me": {
+      "running": {
+        "jobs": 1,
+        "cpus": 16,
+        "mem_mb": 65536,
+        "gpus": 2
+      },
+      "pending": {
+        "jobs": 1,
+        "cpus": 8,
+        "mem_mb": 32768,
+        "gpus": 1
+      }
+    },
+    "others": {
+      "running": {
+        "jobs": 1,
+        "cpus": 64,
+        "mem_mb": 262144,
+        "gpus": 0
+      },
+      "pending": {
+        "jobs": 0,
+        "cpus": 0,
+        "mem_mb": 0,
+        "gpus": 0
+      }
+    }
+  }
+}
