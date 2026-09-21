@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 
-import { SlurmClient } from './client';
-import { detailPresentation, openDetailWindow } from './detail';
+import { ClusterClient } from './cluster';
+import { detailPresentation, openDetailWindow, openJobOutput } from './detail';
 import { showDetailQuickPick } from './quickpick';
-import { HostMessage, ViewMessage } from './types';
+import { readMergeSettings } from './servers';
+import { DetailTarget, HostMessage, ViewMessage } from './types';
 
 export type Variant = 'sidebar' | 'dashboard' | 'detail' | 'modal';
 
@@ -58,7 +59,7 @@ function sectionsFor(variant: Variant): string[] {
   return valid.length > 0 ? valid : ['summary', 'jobs'];
 }
 
-function configMessage(variant: Variant): HostMessage {
+function configMessage(variant: Variant, client: ClusterClient): HostMessage {
   const settings = vscode.workspace.getConfiguration('slurmTop');
   return {
     type: 'config',
@@ -66,6 +67,8 @@ function configMessage(variant: Variant): HostMessage {
     ownerFilter: settings.get<string>('defaultOwnerFilter', 'me'),
     interval: settings.get<number>('refreshInterval', 3),
     detailsIn: detailPresentation(),
+    servers: client.servers.map((spec) => ({ id: spec.id, name: client.nameOf(spec.id) })),
+    merge: readMergeSettings(),
   };
 }
 
@@ -78,20 +81,21 @@ function configMessage(variant: Variant): HostMessage {
  * waiting for instead of looking frozen.
  */
 async function probeCpu(
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
-  node: string,
+  target: DetailTarget,
   post: (message: HostMessage) => void
 ): Promise<void> {
-  post({ type: 'cpuProbe', node, state: 'started' });
+  const node = target.id;
+  post({ type: 'cpuProbe', server: target.server, node, state: 'started' });
   try {
-    const detail = await client.fetchDetail('node', node, { probeCpu: true });
-    post({ type: 'detail', detail });
+    const detail = await client.fetchDetail(target, { probeCpu: true });
+    post({ type: 'detail', server: target.server, serverName: client.nameOf(target.server), detail });
     const error = detail.kind === 'node' ? detail.cpu?.error : undefined;
-    post({ type: 'cpuProbe', node, state: 'done', message: error });
+    post({ type: 'cpuProbe', server: target.server, node, state: 'done', message: error });
   } catch (err) {
     log.appendLine(`cpu probe failed for ${node}: ${String(err)}`);
-    post({ type: 'cpuProbe', node, state: 'done', message: String(err) });
+    post({ type: 'cpuProbe', server: target.server, node, state: 'done', message: String(err) });
   }
 }
 
@@ -106,7 +110,7 @@ export function bindWebview(
   context: vscode.ExtensionContext,
   webview: vscode.Webview,
   variant: Variant,
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
   isVisible: () => boolean
 ): vscode.Disposable {
@@ -121,13 +125,9 @@ export function bindWebview(
     webview.onDidReceiveMessage(async (raw: ViewMessage) => {
       switch (raw.type) {
         case 'ready': {
-          post(configMessage(variant));
+          post(configMessage(variant, client));
           const { state, message } = client.currentState;
-          post({
-            type: 'status',
-            state: state === 'idle' ? 'paused' : state === 'running' ? 'running' : state,
-            message,
-          });
+          post({ type: 'status', state, message });
           if (client.latest) {
             post({ type: 'snapshot', snapshot: client.latest });
           }
@@ -141,19 +141,25 @@ export function bindWebview(
           break;
         case 'openDetail': {
           const presentation = detailPresentation();
+          const target: DetailTarget = { server: raw.server ?? '', kind: raw.kind, id: raw.id };
           if (presentation === 'popup') {
-            await showDetailQuickPick(client, log, { kind: raw.kind, id: raw.id }, (fallback) => {
+            await showDetailQuickPick(client, log, target, (fallback) => {
               void openDetailWindow(context, client, log, fallback, false, true);
             });
             break;
           }
           if (presentation !== 'overlay') {
-            await openDetailWindow(context, client, log, { kind: raw.kind, id: raw.id });
+            await openDetailWindow(context, client, log, target);
             break;
           }
           try {
-            const detail = await client.fetchDetail(raw.kind, raw.id);
-            post({ type: 'detail', detail });
+            const detail = await client.fetchDetail(target);
+            post({
+              type: 'detail',
+              server: target.server,
+              serverName: client.nameOf(target.server),
+              detail,
+            });
           } catch (err) {
             log.appendLine(`detail lookup failed for ${raw.kind} ${raw.id}: ${String(err)}`);
             post({ type: 'detailError', message: String(err) });
@@ -166,14 +172,35 @@ export function bindWebview(
           break;
         case 'togglePin':
           try {
-            post({ type: 'pinned', pinned: await client.togglePin(raw.jobId) });
+            post({
+              type: 'pinned',
+              server: raw.server,
+              pinned: await client.togglePin(raw.server, raw.jobId),
+            });
           } catch (err) {
             log.appendLine(`pin toggle failed for ${raw.jobId}: ${String(err)}`);
             vscode.window.showWarningMessage(`Could not pin job ${raw.jobId}: ${String(err)}`);
           }
           break;
         case 'probeCpu':
-          await probeCpu(client, log, raw.node, post);
+          await probeCpu(client, log, { server: raw.server ?? '', kind: 'node', id: raw.node }, post);
+          break;
+        case 'openOutput':
+          // Only reachable with `detailsIn: overlay`, where a job's detail --
+          // output buttons and all -- is drawn inside this view rather than in
+          // a window of its own.
+          await openJobOutput(
+            client,
+            log,
+            raw.server,
+            String(raw.jobId),
+            raw.stream === 'stderr' ? 'stderr' : 'stdout',
+            String(raw.path ?? ''),
+            Number(raw.size ?? 0)
+          );
+          break;
+        case 'manageServers':
+          await vscode.commands.executeCommand('slurmTop.manageServers');
           break;
         case 'showLog':
           log.show(true);
@@ -183,15 +210,11 @@ export function bindWebview(
   );
 
   disposables.push(client.onSnapshot((snapshot) => post({ type: 'snapshot', snapshot })));
-  disposables.push(
-    client.onState(({ state, message }) =>
-      post({ type: 'status', state: state === 'idle' ? 'paused' : state, message })
-    )
-  );
+  disposables.push(client.onState(({ state, message }) => post({ type: 'status', state, message })));
   disposables.push(
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('slurmTop')) {
-        post(configMessage(variant));
+        post(configMessage(variant, client));
       }
     })
   );

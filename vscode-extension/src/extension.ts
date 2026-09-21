@@ -1,9 +1,11 @@
 import { execFile } from 'child_process';
 import * as vscode from 'vscode';
 
-import { SlurmClient } from './client';
+import { ClusterClient } from './cluster';
 import { detailPresentation, openDetailWindow, openJobOutput } from './detail';
 import { showDetailQuickPick } from './quickpick';
+import { addServer, manageServers } from './serverui';
+import { DetailTarget } from './types';
 import { bindWebview, renderHtml } from './view';
 
 const DASHBOARD_VIEW_TYPE = 'slurmTop.dashboard';
@@ -29,7 +31,7 @@ function terminalCliInstalled(): Promise<boolean> {
 class VisibilityTracker {
   private readonly visible = new Set<string>();
 
-  constructor(private readonly client: SlurmClient) {}
+  constructor(private readonly client: ClusterClient) {}
 
   set(key: string, isVisible: boolean): void {
     if (isVisible) {
@@ -62,7 +64,7 @@ class SidebarProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly client: SlurmClient,
+    private readonly client: ClusterClient,
     private readonly log: vscode.OutputChannel,
     private readonly visibility: VisibilityTracker
   ) {}
@@ -88,7 +90,7 @@ let dashboard: vscode.WebviewPanel | undefined;
 
 function openDashboard(
   context: vscode.ExtensionContext,
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
   visibility: VisibilityTracker
 ): void {
@@ -123,12 +125,31 @@ function openDashboard(
   });
 }
 
+/**
+ * Which server a typed id belongs to.
+ *
+ * Only asked when there is more than one: job ids and node names are unique
+ * within a cluster and nowhere else, so with two clusters watching, "1234"
+ * alone is genuinely ambiguous.
+ */
+async function pickServer(client: ClusterClient, what: string): Promise<string | undefined> {
+  const servers = client.servers;
+  if (servers.length <= 1) {
+    return servers[0]?.id ?? '';
+  }
+  const picked = await vscode.window.showQuickPick(
+    servers.map((spec) => ({ label: client.nameOf(spec.id), id: spec.id })),
+    { title: `Which server has this ${what}?` }
+  );
+  return picked?.id;
+}
+
 /** Open details wherever `slurmTop.detailsIn` says they belong. */
 async function showDetails(
   context: vscode.ExtensionContext,
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
-  target: { kind: 'job' | 'node'; id: string }
+  target: DetailTarget
 ): Promise<void> {
   if (detailPresentation() === 'popup') {
     await showDetailQuickPick(client, log, target, (fallback) => {
@@ -148,13 +169,14 @@ async function showDetails(
  * scripts send both streams to the same place, and a menu of one is noise.
  */
 async function pickJobOutput(
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
+  server: string,
   jobId: string
 ): Promise<void> {
   let streams;
   try {
-    const detail = await client.fetchDetail('job', jobId);
+    const detail = await client.fetchDetail({ server, kind: 'job', id: jobId });
     streams = detail.kind === 'job' ? detail.output : undefined;
   } catch (err) {
     log.appendLine(`output: could not look up job ${jobId}: ${String(err)}`);
@@ -195,13 +217,13 @@ async function pickJobOutput(
   }
   for (const stream of chosen.streams) {
     const file = streams[stream];
-    await openJobOutput(client, log, jobId, stream, file.path, file.size);
+    await openJobOutput(client, log, server, jobId, stream, file.path, file.size);
   }
 }
 
 export function activate(context: vscode.ExtensionContext): void {
   const log = vscode.window.createOutputChannel('Slurm Monitor');
-  const client = new SlurmClient(context.extensionPath, log);
+  const client = new ClusterClient(context.extensionPath, log);
   const visibility = new VisibilityTracker(client);
   context.subscriptions.push(log, client);
 
@@ -220,23 +242,37 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('slurmTop.refresh', () => client.restart()),
     vscode.commands.registerCommand('slurmTop.restart', () => client.restart()),
     vscode.commands.registerCommand('slurmTop.showOutput', () => log.show(true)),
+    vscode.commands.registerCommand('slurmTop.addServer', () => addServer()),
+    vscode.commands.registerCommand('slurmTop.manageServers', () => manageServers()),
     vscode.commands.registerCommand('slurmTop.openJobDetails', async (jobId?: string) => {
       const id = jobId ?? (await vscode.window.showInputBox({ prompt: 'Slurm job id', placeHolder: '1234567' }));
-      if (id) {
-        await showDetails(context, client, log, { kind: 'job', id: id.trim() });
+      if (!id) {
+        return;
+      }
+      const server = await pickServer(client, 'job');
+      if (server !== undefined) {
+        await showDetails(context, client, log, { server, kind: 'job', id: id.trim() });
       }
     }),
     vscode.commands.registerCommand('slurmTop.openNodeDetails', async (nodeName?: string) => {
       const id = nodeName ?? (await vscode.window.showInputBox({ prompt: 'Node name', placeHolder: 'node01' }));
-      if (id) {
-        await showDetails(context, client, log, { kind: 'node', id: id.trim() });
+      if (!id) {
+        return;
+      }
+      const server = await pickServer(client, 'machine');
+      if (server !== undefined) {
+        await showDetails(context, client, log, { server, kind: 'node', id: id.trim() });
       }
     }),
     vscode.commands.registerCommand('slurmTop.openJobOutput', async (jobId?: string) => {
       const id =
         jobId ?? (await vscode.window.showInputBox({ prompt: 'Slurm job id', placeHolder: '1234567' }));
-      if (id) {
-        await pickJobOutput(client, log, id.trim());
+      if (!id) {
+        return;
+      }
+      const server = await pickServer(client, 'job');
+      if (server !== undefined) {
+        await pickJobOutput(client, log, server, id.trim());
       }
     }),
     vscode.commands.registerCommand('slurmTop.openTerminalTui', async () => {
@@ -263,7 +299,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (event) => {
-      if (
+      if (event.affectsConfiguration('slurmTop.servers')) {
+        // Only the servers that actually changed are respawned; the rest keep
+        // streaming, so adding a fourth cluster does not blank the other three.
+        await client.reload();
+      } else if (
         event.affectsConfiguration('slurmTop.pythonPath') ||
         event.affectsConfiguration('slurmTop.command') ||
         event.affectsConfiguration('slurmTop.refreshInterval')

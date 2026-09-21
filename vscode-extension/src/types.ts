@@ -154,6 +154,64 @@ export interface Snapshot {
   error?: string;
 }
 
+// --------------------------------------------------------------- many servers
+
+/** How one server is doing, as the views need to draw it. */
+export type ServerState = 'starting' | 'running' | 'paused' | 'error';
+
+/**
+ * One watched cluster inside a merged snapshot.
+ *
+ * Carries its own totals as well as its rows, so a section configured to show
+ * one panel per server has the numbers for that server alone and does not have
+ * to re-derive them from the merged arrays.
+ */
+export interface ServerView {
+  id: string;
+  /** What to show: the configured label, else the hostname the collector reported. */
+  name: string;
+  host: string;
+  user: string;
+  state: ServerState;
+  message?: string;
+  timestamp: number;
+  gpu: GpuStats;
+  summary: Record<'all' | 'me' | 'others', SummaryBucket>;
+  pinned: string[];
+  counts: { jobs: number; nodes: number; disks: number };
+}
+
+/** Which server a row came from; added on merge, never emitted by a collector. */
+export interface ServerTag {
+  server: string;
+  server_name: string;
+}
+
+export type MergedJob = Job & ServerTag;
+export type MergedNode = Node & ServerTag;
+export type MergedDisk = DiskUsage & ServerTag;
+
+/**
+ * Every watched cluster in one object.
+ *
+ * A superset of `Snapshot`: the top-level fields still describe the first
+ * server, so a single-server setup and anything reading only those fields sees
+ * exactly what it saw before multi-server support.
+ */
+export interface MergedSnapshot extends Omit<Snapshot, 'jobs' | 'nodes' | 'disks'> {
+  servers: ServerView[];
+  jobs: MergedJob[];
+  nodes: MergedNode[];
+  disks: MergedDisk[];
+}
+
+/** A job or node to look up, on the server that has it. */
+export interface DetailTarget {
+  server: string;
+  kind: 'job' | 'node';
+  id: string;
+}
+
 /**
  * One "asked for this much, using that much" figure.
  *
@@ -225,31 +283,49 @@ export interface NodeDetail {
 
 /** Extension host -> webview. */
 export type HostMessage =
-  | { type: 'snapshot'; snapshot: Snapshot }
-  | { type: 'status'; state: 'starting' | 'running' | 'paused' | 'error'; message?: string }
+  | { type: 'snapshot'; snapshot: MergedSnapshot }
+  | { type: 'status'; state: ServerState; message?: string }
   | {
       type: 'config';
       sections: string[];
       ownerFilter: string;
       interval: number;
       detailsIn: DetailPresentation;
+      /** The servers being watched, in configured order. */
+      servers: { id: string; name: string }[];
+      /** Per section: one merged panel, or one panel per server. */
+      merge: Record<string, boolean>;
     }
-  | { type: 'pinned'; pinned: string[] }
-  | { type: 'cpuProbe'; node: string; state: 'started' | 'done'; message?: string }
-  | { type: 'detailTarget'; kind: 'job' | 'node'; id: string }
-  | { type: 'detail'; detail: JobDetail | NodeDetail }
+  | { type: 'pinned'; server?: string; pinned: string[] }
+  | { type: 'cpuProbe'; server?: string; node: string; state: 'started' | 'done'; message?: string }
+  | { type: 'detailTarget'; server?: string; serverName?: string; kind: 'job' | 'node'; id: string }
+  | { type: 'detail'; server?: string; serverName?: string; detail: JobDetail | NodeDetail }
   | { type: 'detailError'; message: string };
 
-/** Webview -> extension host. */
+/**
+ * Webview -> extension host.
+ *
+ * Everything that names a job or a node carries `server` with it: two clusters
+ * happily use the same job ids and node names, so an id alone is ambiguous as
+ * soon as there is more than one of them.
+ */
 export type ViewMessage =
   | { type: 'ready' }
   | { type: 'refresh' }
   | { type: 'openDashboard' }
-  | { type: 'openDetail'; kind: 'job' | 'node'; id: string }
+  | { type: 'openDetail'; server?: string; kind: 'job' | 'node'; id: string }
   | { type: 'refreshDetail' }
   | { type: 'closeDetail' }
   | { type: 'copy'; text: string; label?: string }
-  | { type: 'togglePin'; jobId: string }
-  | { type: 'openOutput'; jobId: string; stream: 'stdout' | 'stderr'; path: string; size: number }
-  | { type: 'probeCpu'; node: string }
+  | { type: 'togglePin'; server?: string; jobId: string }
+  | {
+      type: 'openOutput';
+      server?: string;
+      jobId: string;
+      stream: 'stdout' | 'stderr';
+      path: string;
+      size: number;
+    }
+  | { type: 'probeCpu'; server?: string; node: string }
+  | { type: 'manageServers' }
   | { type: 'showLog' };

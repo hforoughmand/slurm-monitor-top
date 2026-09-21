@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.7.0
+
+### Added
+
+- **Watch more than one cluster.** `slurmTop.servers` is a **name → where**
+  grid, which the settings editor edits itself, starting with one row —
+  `this machine → here` — so every server is in one place and a fresh install
+  watches what it always did. An address is `here`, an ssh destination
+  (`me@login01`), or a whole command line (`docker exec slurm slurm-top
+  --json`). **Slurm: Add Server…** is the two-question shortcut; **Slurm: Manage
+  Servers…** and the **servers** link in the summary panel list what you have.
+  Each row gets a collector process of its own, so one cluster being slow or
+  unreachable does not hold up the rest.
+- **An ssh cluster needs nothing installed on it.** Given a destination, the
+  extension tries `slurm-top` there, then `python3 -m slurm_top.export`, and
+  failing both sends its own bundled copy of the collector: the two pure-stdlib
+  modules are compressed, passed to the remote `python3` as an argument and
+  rebuilt in memory. Nothing is written to that machine and nothing is left
+  behind, and the parsing still happens in one place rather than once per
+  cluster. Python 3.9 and an ssh login that does not prompt are the whole
+  requirement.
+- An address of `here` means the machine this runs on, as the dialogs and the
+  setting description have always called it, and an `ssh` line that stops at the
+  destination is finished off with `slurm-top --json` rather than handed to ssh
+  as a flag. Both are what the words say; only the first release read them
+  literally.
+- A collector that will not start now says what it said: `exit 127: bash:
+  slurm-top: command not found`, `Permission denied (publickey)`, and so on,
+  in **Slurm: Show Extension Log** and in the banner. It used to report only
+  that the command "did not respond", having thrown the reason away.
+- **Merged panels, with a SERVER column.** Jobs, machines, GPUs and disks are
+  drawn as one table covering every cluster, each row carrying the server it
+  came from, and the jobs panel gains a server filter beside the owner and state
+  ones. GPUs are merged per model: a cluster with eight A100s and another with
+  two give one `a100` row of ten, naming both. The summary is the exception —
+  one box per cluster by default, because totals that do not say whose they are
+  are the one thing worth keeping apart.
+- `slurmTop.mergeServers` turns that round per section: set `"jobs": false` and
+  the jobs table becomes one panel per cluster, side by side, without the column
+  it no longer needs.
+- A cluster that stops answering says so in its own box, and is named under the
+  merged summary, rather than quietly dropping out of totals that still look
+  plausible.
+
+### Changed
+
+- Rows are now identified by (server, id) rather than by id alone: two clusters
+  will happily both have a job 1234 and a node called `gpu01`, and both are
+  listed. Details, pins, job output and CPU probes are routed back to the
+  collector the row came from.
+- The extension log tags every line with the server it is about.
+- `slurmTop.command` and `slurmTop.pythonPath` still describe the single server
+  watched when `slurmTop.servers` is empty, which is what every installation has
+  until it adds one. Nothing changes for a single cluster: no SERVER column, no
+  server filter, one box.
+
 ## 0.6.0
 
 ### Added

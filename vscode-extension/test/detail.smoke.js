@@ -137,15 +137,24 @@ function freshDetail() {
 const detail = require('../out/detail.js');
 const log = vscodeStub.window.createOutputChannel();
 const context = { extensionUri: { path: '/ext' }, extensionPath: '/ext' };
-const client = { fetchDetail: async () => ({ kind: 'job', job_id: '1', job: null, detail: {}, usage: {} }) };
+/** A ClusterClient as far as detail.ts is concerned. */
+const client = {
+  servers: [{ id: 'alpha', name: 'alpha' }],
+  nameOf: (id) => String(id || 'alpha'),
+  pinnedFor: () => [],
+  fetchDetail: async () => ({ kind: 'job', job_id: '1', job: null, detail: {}, usage: {} }),
+};
 
 /** The collector's answer when the file itself cannot be opened from here. */
 function outputClient(text) {
   return {
+    servers: [{ id: 'alpha', name: 'alpha' }],
+    nameOf: (id) => String(id || 'alpha'),
+    pinnedFor: () => [],
     fetchDetail: async () => ({ kind: 'job', job_id: '1', job: null, detail: {}, usage: {} }),
     calls: [],
-    async fetchJobOutput(jobId, stream, lines) {
-      this.calls.push({ jobId, stream, lines });
+    async fetchJobOutput(server, jobId, stream, lines) {
+      this.calls.push({ server, jobId, stream, lines });
       return {
         kind: 'job-output',
         job_id: jobId,
@@ -170,7 +179,7 @@ async function checkJobOutput() {
   opened.length = 0;
   shown.length = 0;
   let client = outputClient('hello');
-  await fresh.openJobOutput(client, log, '1001', 'stdout', '/scratch/alice/logs/1001.out', 1024);
+  await fresh.openJobOutput(client, log, 'alpha', '1001', 'stdout', '/scratch/alice/logs/1001.out', 1024);
   check('a readable file is opened as a tab', opened.length === 1 && opened[0].path === '/scratch/alice/logs/1001.out',
     JSON.stringify(opened));
   check('and it is shown', shown.length === 1);
@@ -181,7 +190,7 @@ async function checkJobOutput() {
   readableFiles.clear();
   opened.length = 0;
   client = outputClient('tail from the cluster');
-  await fresh.openJobOutput(client, log, '1001', 'stderr', '/scratch/alice/logs/1001.out', 1024);
+  await fresh.openJobOutput(client, log, 'alpha', '1001', 'stderr', '/scratch/alice/logs/1001.out', 1024);
   check('an unreachable file falls back to the collector', client.calls.length === 1,
     JSON.stringify(client.calls));
   check('the fallback asks for the stream that was clicked', client.calls[0]?.stream === 'stderr');
@@ -201,14 +210,14 @@ async function checkJobOutput() {
   warnings.length = 0;
   warningAnswer = undefined;
   client = outputClient('the last lines');
-  await fresh.openJobOutput(client, log, '1001', 'stdout', '/scratch/alice/logs/huge.out', 512 * 1024 * 1024);
+  await fresh.openJobOutput(client, log, 'alpha', '1001', 'stdout', '/scratch/alice/logs/huge.out', 512 * 1024 * 1024);
   check('a huge file is not opened without asking', warnings.length === 1 && opened.length === 0,
     JSON.stringify(warnings));
   check('the question says how big it is', warnings[0]?.includes('512.0M'), warnings[0]);
 
   warningAnswer = 'Open the whole file';
   opened.length = 0;
-  await fresh.openJobOutput(client, log, '1001', 'stdout', '/scratch/alice/logs/huge.out', 512 * 1024 * 1024);
+  await fresh.openJobOutput(client, log, 'alpha', '1001', 'stdout', '/scratch/alice/logs/huge.out', 512 * 1024 * 1024);
   check('answering opens the whole thing', opened.length === 1 && opened[0].path === '/scratch/alice/logs/huge.out',
     JSON.stringify(opened));
   warningAnswer = undefined;
@@ -233,7 +242,7 @@ async function main() {
   console.log('\nfloating window:');
   let mod = freshDetail();
   settings = { detailsIn: 'window' };
-  await mod.openDetailWindow(context, client, log, { kind: 'job', id: '1001' });
+  await mod.openDetailWindow(context, client, log, { server: 'alpha', kind: 'job', id: '1001' });
   check('a panel was created', panels.length === 1);
   check('panel opens as the ACTIVE editor', panels[0].options.viewColumn === vscodeStub.ViewColumn.Active,
     String(panels[0].options.viewColumn));
@@ -243,7 +252,7 @@ async function main() {
   check('panel is titled after the job', panels[0].title === 'Job 1001', panels[0].title);
 
   console.log('\nreuse:');
-  await mod.openDetailWindow(context, client, log, { kind: 'node', id: 'gpu01' });
+  await mod.openDetailWindow(context, client, log, { server: 'alpha', kind: 'node', id: 'gpu01' });
   check('a second request reuses the same window', panels.length === 1);
   check('the reused window is revealed', panels[0].revealed === true);
   check('the reused window is retitled', panels[0].title === 'Node gpu01', panels[0].title);
@@ -254,7 +263,7 @@ async function main() {
   availableCommands = ['noise.command'];
   mod = freshDetail();
   settings = { detailsIn: 'window' };
-  await mod.openDetailWindow(context, client, log, { kind: 'job', id: '1002' });
+  await mod.openDetailWindow(context, client, log, { server: 'alpha', kind: 'job', id: '1002' });
   check('no move command is attempted',
     !executed.includes('workbench.action.moveEditorToNewWindow'), executed.join(','));
   check('it falls back to a tab beside the editor',
@@ -267,7 +276,7 @@ async function main() {
   availableCommands = ['workbench.action.moveEditorToNewWindow'];
   mod = freshDetail();
   settings = { detailsIn: 'tab' };
-  await mod.openDetailWindow(context, client, log, { kind: 'job', id: '1003' });
+  await mod.openDetailWindow(context, client, log, { server: 'alpha', kind: 'job', id: '1003' });
 
   check('a tab opens beside, unfocused', panels[0].options.viewColumn === vscodeStub.ViewColumn.Beside
     && panels[0].options.preserveFocus === true);
@@ -276,7 +285,7 @@ async function main() {
 
   mod = freshDetail();
   settings = { detailsIn: 'card' };
-  await mod.openDetailWindow(context, client, log, { kind: 'job', id: '1004' });
+  await mod.openDetailWindow(context, client, log, { server: 'alpha', kind: 'job', id: '1004' });
   check('a card takes the active column so it covers the editor',
     panels[0].options.viewColumn === vscodeStub.ViewColumn.Active);
   check('a card is not moved to its own window',
@@ -285,7 +294,7 @@ async function main() {
   // forceTab is how the popup's escape hatch asks for a tab regardless.
   mod = freshDetail();
   settings = { detailsIn: 'window' };
-  await mod.openDetailWindow(context, client, log, { kind: 'job', id: '1005' }, false, true);
+  await mod.openDetailWindow(context, client, log, { server: 'alpha', kind: 'job', id: '1005' }, false, true);
   check('forceTab overrides the window setting',
     panels[0].options.viewColumn === vscodeStub.ViewColumn.Beside
       && !executed.includes('workbench.action.moveEditorToNewWindow'));

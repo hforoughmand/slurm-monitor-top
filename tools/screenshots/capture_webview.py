@@ -78,19 +78,31 @@ ALL_SECTIONS = ["summary", "jobs", "nodes", "gpus", "disks"]
 SIDEBAR_SECTIONS = ["summary", "jobs", "gpus"]
 
 # The webview restores its own state on load; seeding it is how a user who has
-# already picked "all" and clicked a row would see the panel.
-SAVED_STATE = {"ownerFilter": "all", "selected": {"jobs": "184220", "nodes": "gpu03"}}
+# already picked "all" and clicked a row would see the panel. A selection is
+# keyed by `server/id`, because two clusters can both have a job 184220.
+SAVED_STATE = {"ownerFilter": "all", "selected": {"jobs": "login01/184220", "nodes": "login01/gpu03"}}
 
 # Pins live in the collector's config file, shared with the terminal UI, so the
 # capture seeds a config rather than faking the state in the view.
 PINNED_JOBS = ["184244", "184288"]
 
-# name -> (variant, sections, detail target, viewport)
+# The second cluster, for the scenes that show more than one. `FAKE_CLUSTER`
+# picks its data out of fake_cluster.py; the name is what the panels show.
+SITES = [("login01", "login01"), ("hpc2", "hpc2")]
+
+# Merging as the settings default: one box per cluster, one table for all of
+# them. The split scene is the other way round for the jobs table.
+MERGED = {"summary": False, "jobs": True, "nodes": True, "gpus": True, "disks": True}
+SPLIT = dict(MERGED, jobs=False, summary=True)
+
+# name -> (variant, sections, detail target, viewport, servers)
 SCENES = {
-    "ext-sidebar": ("sidebar", SIDEBAR_SECTIONS, None, (520, 700)),
-    "ext-dashboard": ("dashboard", ALL_SECTIONS, None, (1500, 940)),
-    "ext-job-detail": ("detail", ALL_SECTIONS, ("job", "184220"), (1400, 820)),
-    "ext-node-detail": ("dashboard", ALL_SECTIONS, ("node", "gpu03"), (1500, 940)),
+    "ext-sidebar": ("sidebar", SIDEBAR_SECTIONS, None, (520, 700), 1, MERGED),
+    "ext-dashboard": ("dashboard", ALL_SECTIONS, None, (1500, 940), 1, MERGED),
+    "ext-job-detail": ("detail", ALL_SECTIONS, ("job", "184220"), (1400, 820), 1, MERGED),
+    "ext-node-detail": ("dashboard", ALL_SECTIONS, ("node", "gpu03"), (1500, 940), 1, MERGED),
+    "ext-two-servers": ("dashboard", ALL_SECTIONS, None, (1500, 1000), 2, MERGED),
+    "ext-two-servers-split": ("dashboard", ALL_SECTIONS, None, (1500, 1000), 2, SPLIT),
 }
 
 
@@ -106,11 +118,55 @@ def collect(env, *args):
     return json.loads(out.stdout)
 
 
-def page(variant, sections, snapshot, detail):
+def merge(parts):
+    """Several snapshots as one, the way `src/merge.ts` does it for the host.
+
+    Kept in step with that file by hand -- it is twenty lines of addition, and
+    the alternative is running TypeScript to take a screenshot.
+    """
+    servers = []
+    jobs, nodes, disks = [], [], []
+    gpu = {"total": 0, "active": 0, "reserved": 0, "free_est": 0,
+           "per_type": {}, "per_type_stats": {}, "types_count": 0}
+    summary = {b: {p: {"jobs": 0, "cpus": 0, "mem_mb": 0, "gpus": 0}
+                   for p in ("running", "pending")}
+               for b in ("all", "me", "others")}
+    for server_id, name, snapshot in parts:
+        servers.append({
+            "id": server_id, "name": name, "host": snapshot["host"], "user": snapshot["user"],
+            "state": "running", "timestamp": snapshot["timestamp"], "gpu": snapshot["gpu"],
+            "summary": snapshot["summary"], "pinned": snapshot.get("pinned", []),
+            "counts": {k: len(snapshot[k]) for k in ("jobs", "nodes", "disks")},
+        })
+        tag = {"server": server_id, "server_name": name}
+        jobs += [dict(row, **tag) for row in snapshot["jobs"]]
+        nodes += [dict(row, **tag) for row in snapshot["nodes"]]
+        disks += [dict(row, **tag) for row in snapshot["disks"]]
+        for key in ("total", "active", "reserved", "free_est"):
+            gpu[key] += snapshot["gpu"].get(key, 0)
+        for model, count in snapshot["gpu"].get("per_type", {}).items():
+            gpu["per_type"][model] = gpu["per_type"].get(model, 0) + count
+        for model, stats in snapshot["gpu"].get("per_type_stats", {}).items():
+            into = gpu["per_type_stats"].setdefault(
+                model, {"total": 0, "active": 0, "reserved": 0, "free_est": 0})
+            for key, value in stats.items():
+                into[key] += value
+        for bucket, phases in snapshot["summary"].items():
+            for phase, cell in phases.items():
+                for key, value in cell.items():
+                    summary[bucket][phase][key] += value
+    gpu["types_count"] = len(gpu["per_type_stats"])
+    first = parts[0][2]
+    return dict(first, servers=servers, jobs=jobs, nodes=nodes, disks=disks,
+                gpu=gpu, summary=summary)
+
+
+def page(variant, sections, snapshot, detail, merge_settings=None, servers=None):
     """The harness page: real stylesheet, real script, stubbed host."""
     messages = [
         {"type": "config", "sections": sections, "ownerFilter": "all",
-         "interval": 3, "detailsIn": "overlay" if variant != "modal" else "window"},
+         "interval": 3, "detailsIn": "overlay" if variant != "modal" else "window",
+         "servers": servers or [], "merge": merge_settings or MERGED},
         {"type": "status", "state": "running"},
         {"type": "snapshot", "snapshot": snapshot},
     ]
@@ -209,8 +265,12 @@ def main(argv=None):
         env["USER"] = fake_cluster.ME
         env["HOME"] = str(home)
 
-        snapshot = collect(env)
-        snapshot["host"] = "login01"
+        collected = []
+        for site, label in SITES:
+            site_env = dict(env, FAKE_CLUSTER=site)
+            snapshot = collect(site_env)
+            snapshot["host"] = label
+            collected.append((label, label, snapshot))
         details = {}
         for name in names:
             target = SCENES[name][2]
@@ -219,9 +279,13 @@ def main(argv=None):
                 details[target] = collect(env, flag, target[1])
 
         for name in names:
-            variant, sections, target, viewport = SCENES[name]
+            variant, sections, target, viewport, count, merge_settings = SCENES[name]
+            parts = collected[:count]
             html = tmpdir / f"{name}.html"
-            html.write_text(page(variant, sections, snapshot, details.get(target)))
+            html.write_text(page(
+                variant, sections, merge(parts), details.get(target),
+                merge_settings, [{"id": s[0], "name": s[1]} for s in parts],
+            ))
             png = out / f"{name}.png"
             shoot(chrome, html, png, viewport)
             print(png)

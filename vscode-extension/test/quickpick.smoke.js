@@ -85,9 +85,13 @@ const separators = (pick) => pick.items.filter((i) => i.kind === -1).map((i) => 
 
 async function main() {
   console.log('job popup:');
-  const client = { fetchDetail: async (kind, id) => (kind === 'job' ? { ...JOB, job_id: id } : NODE) };
+  const client = {
+    servers: [{ id: 'alpha', name: 'alpha' }],
+    nameOf: (id) => String(id || 'alpha'),
+    fetchDetail: async (target) => (target.kind === 'job' ? { ...JOB, job_id: target.id } : NODE),
+  };
   let openedInTab = null;
-  await showDetailQuickPick(client, log, { kind: 'job', id: '1001' }, (t) => (openedInTab = t));
+  await showDetailQuickPick(client, log, { server: 'alpha', kind: 'job', id: '1001' }, (t) => (openedInTab = t));
   const pick = lastPick;
 
   check('the popup is shown', pick.shown);
@@ -119,7 +123,7 @@ async function main() {
   check('the escape hatch opens a tab and closes the popup', !pick.shown && openedInTab?.id === '1001');
 
   console.log('\nnode popup:');
-  await showDetailQuickPick(client, log, { kind: 'node', id: 'gpu01' }, () => {});
+  await showDetailQuickPick(client, log, { server: 'alpha', kind: 'node', id: 'gpu01' }, () => {});
   const nodePick = lastPick;
   check('node title counts its jobs', nodePick.title.includes('gpu01') && nodePick.title.includes('1 job'), nodePick.title);
   check('node fields are listed', labels(nodePick).includes('CPUTot'));
@@ -135,14 +139,22 @@ async function main() {
   check('the switched popup shows job fields', labels(nodePick).includes('WorkDir'));
 
   console.log('\nfailure handling:');
-  const broken = { fetchDetail: async () => { throw new Error('scontrol timed out'); } };
-  await showDetailQuickPick(broken, log, { kind: 'job', id: '9' }, () => {});
+  const broken = {
+    servers: [{ id: 'alpha', name: 'alpha' }],
+    nameOf: () => 'alpha',
+    fetchDetail: async () => { throw new Error('scontrol timed out'); },
+  };
+  await showDetailQuickPick(broken, log, { server: 'alpha', kind: 'job', id: '9' }, () => {});
   check('an error becomes a visible item, not a crash',
     lastPick.items[0].description.includes('scontrol timed out'), JSON.stringify(lastPick.items[0]));
   check('busy is cleared even when loading failed', lastPick.busy === false);
 
-  const empty = { fetchDetail: async () => ({ kind: 'job', job_id: '9', job: null, detail: {}, usage: {} }) };
-  await showDetailQuickPick(empty, log, { kind: 'job', id: '9' }, () => {});
+  const empty = {
+    servers: [{ id: 'alpha', name: 'alpha' }],
+    nameOf: () => 'alpha',
+    fetchDetail: async () => ({ kind: 'job', job_id: '9', job: null, detail: {}, usage: {} }),
+  };
+  await showDetailQuickPick(empty, log, { server: 'alpha', kind: 'job', id: '9' }, () => {});
   check('an empty result explains itself', lastPick.items[0].label.includes('no fields'), lastPick.items[0].label);
 }
 

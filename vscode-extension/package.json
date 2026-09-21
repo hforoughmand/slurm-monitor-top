@@ -2,7 +2,7 @@
   "name": "slurm-monitor-top",
   "displayName": "Slurm Monitor (slurm-top)",
   "description": "htop-style live view of Slurm jobs, nodes, GPUs and disks, in the sidebar or a full editor tab.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "license": "MIT",
   "publisher": "hforoughmand",
   "icon": "media/icon.png",
@@ -71,6 +71,16 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "slurmTop.addServer",
+        "title": "Slurm: Add Server…",
+        "icon": "$(add)"
+      },
+      {
+        "command": "slurmTop.manageServers",
+        "title": "Slurm: Manage Servers…",
+        "icon": "$(server)"
+      },
+      {
         "command": "slurmTop.restart",
         "title": "Slurm: Restart Data Collector"
       },
@@ -84,15 +94,15 @@
       },
       {
         "command": "slurmTop.openJobDetails",
-        "title": "Slurm: Show Job Details\u2026"
+        "title": "Slurm: Show Job Details…"
       },
       {
         "command": "slurmTop.openNodeDetails",
-        "title": "Slurm: Show Node Details\u2026"
+        "title": "Slurm: Show Node Details…"
       },
       {
         "command": "slurmTop.openJobOutput",
-        "title": "Slurm: Open Job Output (stdout/stderr)\u2026"
+        "title": "Slurm: Open Job Output (stdout/stderr)…"
       }
     ],
     "menus": {
@@ -106,16 +116,66 @@
           "command": "slurmTop.refresh",
           "when": "view == slurmTop.sidebar",
           "group": "navigation@2"
+        },
+        {
+          "command": "slurmTop.manageServers",
+          "when": "view == slurmTop.sidebar",
+          "group": "navigation@3"
         }
       ]
     },
     "configuration": {
       "title": "Slurm Monitor",
       "properties": {
+        "slurmTop.servers": {
+          "type": "object",
+          "default": {
+            "this machine": "here"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "markdownDescription": "Where that cluster is: `here` for the machine this runs on, an ssh destination (`me@login01`), or a whole command line (`ssh -J jump login02`, `docker exec slurm slurm-top --json`)."
+          },
+          "markdownDescription": "The clusters to watch, as name → where. The name labels the cluster in the tables; the address is one of:\n\n- `here` — the machine this extension runs on, which under Remote - SSH is the host you are connected to. The row you start with. Rename it and that name is used; leave it and the panels show its hostname.\n- `me@login01` — an ssh destination, as you would type it after `ssh`\n- `ssh -J jump me@login02` — a whole ssh line, if it needs options; `slurm-top --json` is added for you when the line stops at the destination\n- `docker exec slurm slurm-top --json` — any command that prints slurm-top JSON\n\nEach row gets a collector process of its own, and their jobs, machines, GPUs and disks are merged into one view, tagged with the server they came from — see `#slurmTop.mergeServers#`. Remove a row to stop watching it; emptying the list altogether brings `here` back.\n\nAn ssh cluster needs slurm-monitor-top installed there, reachable from a *non-interactive* login (check with `ssh HOST slurm-top --json --help`; if it says command not found, give the full path or `python3 -m slurm_top.export` in the address), and a login that does not ask for a password: a bare destination is reached with `ssh -o BatchMode=yes`, so give it a key or an agent. **Slurm: Show Extension Log** reports what a failing command said."
+        },
+        "slurmTop.mergeServers": {
+          "type": "object",
+          "additionalProperties": false,
+          "markdownDescription": "With several servers in `#slurmTop.servers#`, whether each section is one panel covering all of them (with a SERVER column) or one panel per server. Ignored while only one server is watched.",
+          "properties": {
+            "summary": {
+              "type": "boolean",
+              "description": "One box of totals for everything, rather than one box per server."
+            },
+            "jobs": {
+              "type": "boolean",
+              "description": "One jobs table for every server, with a server column and a server filter."
+            },
+            "nodes": {
+              "type": "boolean",
+              "description": "One machines table for every server."
+            },
+            "gpus": {
+              "type": "boolean",
+              "description": "One GPU table, with each model's cards summed across the servers that have them."
+            },
+            "disks": {
+              "type": "boolean",
+              "description": "One disks table for every server."
+            }
+          },
+          "default": {
+            "summary": false,
+            "jobs": true,
+            "nodes": true,
+            "gpus": true,
+            "disks": true
+          }
+        },
         "slurmTop.pythonPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Python interpreter used to run the data collector. Empty means: try `python3`, then `python`. Ignored when `#slurmTop.command#` is set."
+          "markdownDescription": "Python interpreter used to run the data collector. Empty means: try `python3`, then `python`. Ignored when `#slurmTop.command#` is set, and once `#slurmTop.servers#` has anything in it."
         },
         "slurmTop.command": {
           "type": "array",
@@ -123,7 +183,7 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Full command that emits slurm-top JSON, as an argv array (for example `[\"ssh\", \"login01\", \"slurm-top\", \"--json\"]`). Data-mode flags such as `--watch` are appended. Empty means auto-detect."
+          "markdownDescription": "Full command that emits slurm-top JSON, as an argv array (for example `[\"ssh\", \"login01\", \"slurm-top\", \"--json\"]`). Data-mode flags such as `--watch` are appended. Empty means auto-detect. Describes the single fallback server, and is ignored once `#slurmTop.servers#` has anything in it."
         },
         "slurmTop.refreshInterval": {
           "type": "number",
@@ -202,7 +262,7 @@
     "vscode:prepublish": "npm run compile",
     "package": "npm run compile && npx @vscode/vsce package --baseContentUrl https://github.com/hforoughmand/slurm-monitor-top/raw/HEAD/vscode-extension",
     "publish-vsce": "npm run compile && npx @vscode/vsce publish --baseContentUrl https://github.com/hforoughmand/slurm-monitor-top/raw/HEAD/vscode-extension",
-    "test": "npm run compile && node test/webview.smoke.js && node test/quickpick.smoke.js && node test/detail.smoke.js && node test/host.smoke.js"
+    "test": "npm run compile && node test/webview.smoke.js && node test/multiserver.smoke.js && node test/quickpick.smoke.js && node test/detail.smoke.js && node test/host.smoke.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

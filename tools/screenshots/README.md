@@ -75,6 +75,8 @@ Extension (`vscode-extension/assets/ext-<name>.png`):
 | `ext-dashboard` | The full editor tab |
 | `ext-job-detail` | Job details as their own view |
 | `ext-node-detail` | Machine details as an overlay on the dashboard |
+| `ext-two-servers` | Two clusters at once, merged into one set of tables |
+| `ext-two-servers-split` | The same two with the jobs table shown per server |
 
 ## How they work
 
@@ -98,6 +100,14 @@ so the footer disappears. `patch_svg()` synthesises the missing clip paths and
 grows the viewBox to match; without it every screenshot loses its keybinding
 bar.
 
+The two-server scenes need a second cluster, so `fake_cluster.py` carries one:
+`FAKE_CLUSTER=hpc2` swaps its jobs, machines, disks and CPU models for a
+smaller site's. `capture_webview.py` collects a snapshot under each and merges
+them the way `vscode-extension/src/merge.ts` does, so the panels see exactly
+what the extension host would send. The two clusters deliberately share the
+`a100` and the user `alice`: that is what gives the merged GPU table a model to
+add up across both, and the owner filter something to find on either.
+
 `capture_webview.py` needs no editor. The webview is plain HTML driven by
 messages from the extension host, so the script builds a page around the real
 `media/main.css` and `media/main.js`, stubs `acquireVsCodeApi`, supplies VS
@@ -109,6 +119,7 @@ the extension, and are not faked.
 
 ## Changing the cluster
 
-Edit the `JOBS`, `NODES` and `DISKS` tables at the top of `fake_cluster.py` and
-re-run the capture scripts. Keep the invented names invented: the point of this
+Edit the `JOBS`, `NODES` and `DISKS` tables at the top of `fake_cluster.py` —
+or the `HPC2_*` ones below them, for the second cluster — and re-run the capture
+scripts. Keep the invented names invented: the point of this
 directory is that no screenshot ever has to be blurred.

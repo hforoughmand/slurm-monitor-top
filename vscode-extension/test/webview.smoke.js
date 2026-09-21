@@ -201,7 +201,11 @@ function run(variant, sections, detailsIn) {
     // The host is the authority on pins: its answer wins over the local guess.
     send({ type: 'pinned', pinned: ['1004'] });
     check('a pin list from the host is applied', order()[0] === '1004', order().join(','));
-    check('pins survive a reload', ((window.eval('__state') || {}).pinned || []).join(',') === '1004');
+    // Pins are stored per server; a snapshot with no server list keys them
+    // under the empty string.
+    check('pins survive a reload',
+      (((window.eval('__state') || {}).pinned || {})[''] || []).join(',') === '1004',
+      JSON.stringify((window.eval('__state') || {}).pinned));
 
     // Reversing the sort must not drag the pinned rows to the bottom.
     const jobIdHeader = jobsPanel.querySelectorAll('thead th')[headerText.indexOf('JOBID')];

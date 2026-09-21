@@ -1,7 +1,9 @@
 import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import * as vscode from 'vscode';
 
-import { Collector, resolveCollector } from './resolve';
+import { shortArgv } from './remote';
+import { Collector, lastResolutionFailure, resolveCollector } from './resolve';
+import { ServerSpec } from './servers';
 import { JobDetail, JobOutput, NodeDetail, Snapshot, SUPPORTED_SCHEMA } from './types';
 
 export type ClientState = 'idle' | 'starting' | 'running' | 'error';
@@ -13,6 +15,10 @@ export type ClientState = 'idle' | 'starting' | 'running' | 'error';
  * A streaming child rather than one spawn per refresh: on a login node an
  * interpreter start costs more than the squeue call itself, and a 3-second
  * poll that pays it every tick is noticeable to everyone else on the node.
+ *
+ * One of these per watched server. It knows nothing about the others: the
+ * merging, and the routing of a click back to the right one, belong to
+ * `ClusterClient` above it.
  */
 export class SlurmClient implements vscode.Disposable {
   private readonly snapshotEmitter = new vscode.EventEmitter<Snapshot>();
@@ -33,9 +39,29 @@ export class SlurmClient implements vscode.Disposable {
   private schemaWarned = false;
 
   constructor(
+    readonly spec: ServerSpec,
     private readonly extensionPath: string,
     private readonly log: vscode.OutputChannel
   ) {}
+
+  get id(): string {
+    return this.spec.id;
+  }
+
+  /** What to call this server in a message: its label, else its hostname. */
+  get label(): string {
+    return this.spec.name || this.lastSnapshot?.host || this.spec.id;
+  }
+
+  /** Take a new label from the settings without restarting the collector. */
+  rename(name: string): void {
+    this.spec.name = name;
+  }
+
+  /** Prefix log lines with the server, so one channel can carry several. */
+  private note(line: string): void {
+    this.log.appendLine(`[${this.label}] ${line}`);
+  }
 
   get latest(): Snapshot | undefined {
     return this.lastSnapshot;
@@ -62,12 +88,17 @@ export class SlurmClient implements vscode.Disposable {
     this.setState('starting');
 
     if (!this.collector) {
-      this.collector = await resolveCollector(this.extensionPath, this.log);
+      this.collector = await resolveCollector(this.spec, this.extensionPath, this.log);
       if (!this.collector) {
+        const why = lastResolutionFailure();
         this.setState(
           'error',
-          'Could not find a way to run slurm-top. Install it with `pip install slurm-monitor-top`, ' +
-            'set slurmTop.pythonPath, or set slurmTop.command.'
+          this.spec.command.length
+            ? `${this.label}: \`${shortArgv(this.spec.command)}\` did not answer` +
+              `${why ? ` — ${why}` : ''}. Over ssh, slurm-monitor-top has to be installed there and on ` +
+              'the PATH of a non-interactive login.'
+            : 'Could not find a way to run slurm-top. Install it with `pip install slurm-monitor-top`, ' +
+              `set slurmTop.pythonPath, or set slurmTop.command.${why ? ` (${why})` : ''}`
         );
         return;
       }
@@ -79,7 +110,7 @@ export class SlurmClient implements vscode.Disposable {
     const interval = vscode.workspace.getConfiguration('slurmTop').get<number>('refreshInterval', 3);
     const [command, ...args] = this.collector.argv;
     const argv = [...args, '--watch', String(interval)];
-    this.log.appendLine(`spawn: ${command} ${argv.join(' ')}`);
+    this.note(`spawn: ${shortArgv([command, ...argv])}`);
 
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -96,14 +127,14 @@ export class SlurmClient implements vscode.Disposable {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => this.consume(chunk));
     child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => this.log.appendLine(`collector stderr: ${chunk.trim()}`));
+    child.stderr.on('data', (chunk: string) => this.note(`collector stderr: ${chunk.trim()}`));
     child.on('error', (err) => {
-      this.log.appendLine(`collector error: ${String(err)}`);
+      this.note(`collector error: ${String(err)}`);
       this.setState('error', String(err));
     });
     child.on('close', (code, signal) => {
       this.child = undefined;
-      this.log.appendLine(`collector exited (code=${code} signal=${signal})`);
+      this.note(`collector exited (code=${code} signal=${signal})`);
       if (this.disposed || !this.wanted) {
         return;
       }
@@ -117,7 +148,7 @@ export class SlurmClient implements vscode.Disposable {
     this.wanted = false;
     this.clearRestart();
     if (this.child) {
-      this.log.appendLine('stopping collector');
+      this.note('stopping collector');
       this.child.kill();
       this.child = undefined;
     }
@@ -170,7 +201,7 @@ export class SlurmClient implements vscode.Disposable {
     // A collector that somehow stops emitting newlines must not grow the buffer
     // without bound.
     if (this.buffer.length > 8 * 1024 * 1024) {
-      this.log.appendLine('collector: discarding oversized partial line');
+      this.note('collector: discarding oversized partial line');
       this.buffer = '';
     }
   }
@@ -180,7 +211,7 @@ export class SlurmClient implements vscode.Disposable {
     try {
       parsed = JSON.parse(line) as Snapshot;
     } catch (err) {
-      this.log.appendLine(`collector: unparseable line (${String(err)}): ${line.slice(0, 200)}`);
+      this.note(`collector: unparseable line (${String(err)}): ${line.slice(0, 200)}`);
       return;
     }
     if (parsed.error) {
@@ -189,7 +220,7 @@ export class SlurmClient implements vscode.Disposable {
     }
     if (parsed.schema !== SUPPORTED_SCHEMA && !this.schemaWarned) {
       this.schemaWarned = true;
-      this.log.appendLine(
+      this.note(
         `collector: schema ${parsed.schema} but this extension expects ${SUPPORTED_SCHEMA}; ` +
           'some fields may be missing. Update slurm-monitor-top or the extension.'
       );
@@ -208,11 +239,11 @@ export class SlurmClient implements vscode.Disposable {
    */
   private async runOnce(extra: string[], timeout = 30000): Promise<unknown> {
     if (!this.collector) {
-      this.collector = await resolveCollector(this.extensionPath, this.log);
+      this.collector = await resolveCollector(this.spec, this.extensionPath, this.log);
     }
     const collector = this.collector;
     if (!collector) {
-      throw new Error('No slurm-top collector available.');
+      throw new Error(`No slurm-top collector available for ${this.label}.`);
     }
     const [command, ...args] = collector.argv;
     const argv = [...args, ...extra];

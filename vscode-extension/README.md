@@ -9,7 +9,8 @@ inside the editor: live jobs, nodes, GPUs and disks, in two sizes.
   terminal UI: jobs and nodes side by side, GPUs and disks below.
 
 Both refresh on a timer, keep their scroll position and selection across
-refreshes, and share one background collector process.
+refreshes, and share one background collector process per cluster — and there
+can be [more than one cluster](#watching-more-than-one-cluster).
 
 ![The sidebar view](assets/ext-sidebar.png)
 
@@ -31,6 +32,119 @@ refreshes, and share one background collector process.
 Double-click (or select and press <kbd>Enter</kbd>) a job or machine for its
 full `scontrol` details in a popup; press <kbd>c</kbd> to copy the selected row.
 <kbd>↑</kbd> and <kbd>↓</kbd> move the selection once a table has focus.
+
+## Watching more than one cluster
+
+One setting, **`slurmTop.servers`**, which the settings editor renders as a
+two-column grid with an **Add Item** button: the name on the left labels that
+cluster in the tables, the address on the right says where it is.
+
+| Address | Runs |
+|---|---|
+| `here` | the machine the extension runs on — under Remote - SSH, the host you are connected to |
+| `me@login01` | `ssh -o BatchMode=yes me@login01 slurm-top --json` |
+| `ssh -J jump me@login02` | the line as written, with `slurm-top --json` added — an ssh line that stops at the destination is a login shell, not a collector |
+| `ssh login03 python3 -m slurm_top.export` | exactly that — an address that names a command is run as it stands, and nothing else is tried |
+| `docker exec slurm slurm-top --json` | exactly that — anything that prints slurm-top JSON |
+
+The list starts with one row, `this machine → here`, so a fresh install watches
+what it always did and every server lives in one place:
+
+```jsonc
+"slurmTop.servers": {
+  "this machine": "here",
+  "alpha": "me@login01",
+  "box":   "docker exec slurm slurm-top --json"
+}
+```
+
+Rename the first row and that name labels its panels; leave it and they show the
+machine's own hostname. Remove it to stop watching the local machine — and if
+you empty the list altogether, it comes back, because a view of nothing helps
+no one.
+
+**Slurm: Add Server…** is the shortcut: two questions, and the row is written
+for you. **Slurm: Manage Servers…** — and the **servers** link in the summary
+panel — lists what you have, renames, removes, and opens the settings editor on
+the list.
+
+Each row gets a collector process of its own, so one cluster being slow or
+unreachable does not hold up the rest: a server that stops answering says so in
+its own box while the others keep refreshing.
+
+### What an ssh server needs
+
+Only ssh and a Python. The extension carries its own copy of the collector, so
+if the cluster has not got slurm-monitor-top installed, the two modules are
+compressed, handed to the remote `python3` as an argument and rebuilt in memory
+there. Nothing is written to that machine and nothing is left behind — and
+`squeue`, `sinfo` and `scontrol` are read by the same parsers as everywhere
+else, so the numbers cannot drift between clusters.
+
+Given a destination, three things are tried in order, cheapest first, and
+whichever answers is used for the rest of the session:
+
+| | |
+|---|---|
+| `slurm-top --json` | it is installed there and on the `PATH` of a non-interactive login |
+| `python3 -m slurm_top.export` | the package is importable but its script is not on `PATH` — what `pip install --user` leaves you with |
+| the copy from here, sent over | nothing at all is installed there; 26KB of argument per connection |
+
+**Slurm: Show Extension Log** names the one that won, and quotes what the others
+said. The payloads are elided there, so a log line stays a line.
+
+What is still needed is a login that does not ask for anything: a bare
+destination is reached with `ssh -o BatchMode=yes`, so a passphrase-locked key
+fails immediately rather than hanging on a prompt no one can answer. Use an
+agent, or write the whole ssh command out to pass different options.
+
+Details, job output, pins and CPU probes each cost another connection, so an ssh
+cluster is noticeably snappier with connection sharing in `~/.ssh/config`:
+
+```
+Host login01
+    ControlMaster auto
+    ControlPath ~/.ssh/cm-%r@%h:%p
+    ControlPersist 5m
+```
+
+Python 3.9 or later is the only requirement on the far side, and only for the
+last two rows of that table.
+
+### Merged, or one panel each
+
+By default the clusters are merged: one jobs table, one machines table, one GPU
+table and one disks table covering all of them, each with a **SERVER** column,
+and the jobs panel gains a server filter beside the owner and state ones. The
+summary box is the exception — there is one per cluster, because a box of
+totals that does not say whose they are is the one thing worth keeping apart.
+
+![Two clusters merged into one set of tables](assets/ext-two-servers.png)
+
+GPUs are merged per model rather than per machine: a cluster with eight A100s
+and another with two gives one `a100` row of ten, and the SERVER column names
+both. Open it and the job list spans both clusters.
+
+`slurmTop.mergeServers` changes this per section, and is a grid of checkboxes in
+the settings editor. Turn `jobs` off and the jobs table splits into one panel
+per cluster, side by side, each without the column it no longer needs:
+
+```jsonc
+"slurmTop.mergeServers": { "summary": true, "jobs": false }
+```
+
+![The jobs table split per cluster](assets/ext-two-servers-split.png)
+
+Everything else is unchanged by having several: sorting, search, pinning and
+details all work as before, and each acts on the cluster the row came from. Job
+ids and node names are only unique within one cluster, so the extension keys
+every row on (server, id) — two clusters can both have a job 1234, and both are
+listed. Pins live in each collector's own config file, as they always have, so a
+job pinned on one cluster is pinned in that cluster's terminal dashboard and
+nowhere else.
+
+With one server configured — or none, which is the default — none of this shows
+up: no SERVER column, no server filter, one box.
 
 ## What a job asked for, and what it is using
 
@@ -132,7 +246,8 @@ on its button instead, because re-filling the list while you are typing a filter
 would move the selection out from under you.
 
 **Slurm: Show Job Details…** and **Slurm: Show Node Details…** open details for
-an id you type, without going through a table. **Slurm: Open Job Output
+an id you type, without going through a table — asking which cluster it is on
+when there is more than one. **Slurm: Open Job Output
 (stdout/stderr)…** goes straight to a job's log; when the job wrote two files it
 asks which — **both**, stdout or stderr — and **both** opens the pair as two
 tabs.
@@ -157,9 +272,11 @@ command says so rather than failing if the package is missing.
 
 | Setting | Default | |
 |---|---|---|
+| `slurmTop.servers` | one row for this machine | The clusters to watch, as name → where: `here`, an ssh destination, or a whole command line. |
+| `slurmTop.mergeServers` | tables merged, summary per server | Per section, whether several servers share one panel or get one each. |
 | `slurmTop.refreshInterval` | `3` | Seconds between refreshes. |
-| `slurmTop.pythonPath` | `""` | Interpreter for the collector. Empty tries `python3`, then `python`. |
-| `slurmTop.command` | `[]` | Full argv that emits slurm-top JSON, for unusual setups — for example `["ssh", "login01", "slurm-top", "--json"]`. Data-mode flags are appended. |
+| `slurmTop.pythonPath` | `""` | Interpreter for the collector. Empty tries `python3`, then `python`. Ignored once `slurmTop.servers` has anything in it. |
+| `slurmTop.command` | `[]` | Full argv that emits slurm-top JSON, for unusual setups — for example `["ssh", "login01", "slurm-top", "--json"]`. Data-mode flags are appended. Ignored once `slurmTop.servers` has anything in it. |
 | `slurmTop.pauseWhenHidden` | `true` | Stop polling while no Slurm view is on screen. |
 | `slurmTop.sidebarSections` | all five | Which sections the narrow view shows, in order. Panels there fold by clicking the header. The dashboard always shows all five. |
 | `slurmTop.detailsIn` | `"window"` | `window` for a floating window of its own, `popup` for a command-palette-style list, `card` for a centred card in a tab, `tab` for a plain editor tab, `overlay` for a panel inside the view. |
@@ -168,7 +285,8 @@ command says so rather than failing if the package is missing.
 
 ## How it gets its data
 
-The extension does not parse Slurm output itself. It runs
+The extension does not parse Slurm output itself. For each configured server it
+runs
 
 ```
 slurm-top --json --watch <interval>
@@ -184,9 +302,18 @@ Pinning and CPU probes go through the same command — `--toggle-pin <id>` and
 `--node <name> --probe-cpu` — rather than through editor storage, which is what
 keeps both front ends on one list of pins and one CPU cache.
 
-Collector resolution, in order: `slurmTop.command`; `<python> -m
-slurm_top.export`; `slurm-top --json` on `PATH`; the copy bundled in the
-extension. **Slurm: Show Extension Log** reports which one was chosen.
+Collector resolution, in order: the server's own `command` (or the `ssh` line
+built from its `host`); `slurmTop.command`; `<python> -m slurm_top.export`;
+`slurm-top --json` on `PATH`; the copy bundled in the extension. A server that
+names a command gets that and nothing else — no local fallback can stand in for
+another machine. **Slurm: Show Extension Log** reports which one each server
+got, with every line tagged by the server it is about.
+
+Snapshots are merged in the extension rather than in the collector: each process
+knows only its own cluster, and `src/merge.ts` tags every job, machine and disk
+with the server it came from and adds up the GPU and job totals. Clicks travel
+the other way with the same tag, so a detail lookup, a pin or a CPU probe is
+routed back to the collector that knows the row.
 
 ## Developing
 
@@ -197,18 +324,23 @@ npm run compile   # also refreshes the bundled Python copy
 npm test          # headless checks, no VS Code needed
 ```
 
-`npm test` runs four suites. `test/webview.smoke.js` drives `media/main.js` in
+`npm test` runs five suites. `test/webview.smoke.js` drives `media/main.js` in
 jsdom against a fixture snapshot and checks that tables fill, filters and sorts
 apply, rows update in place rather than duplicating, and the detail overlays
-render. `test/quickpick.smoke.js` stubs VS Code's quick pick and checks the
+render. `test/multiserver.smoke.js` drives the same script against a snapshot carrying
+two clusters that share job ids and node names, and checks the SERVER column,
+the server filter, per-server pins and owner filters, the per-server panels and
+that every click carries its server back to the host.
+`test/quickpick.smoke.js` stubs VS Code's quick pick and checks the
 detail popup's field list, grouping, copy-on-Enter, the node-to-job jump and its
 error handling. `test/detail.smoke.js` checks that the floating window is
 created as the active editor and actually moved out, that an older VS Code
 without that command falls back to a tab, and that every `detailsIn` value —
 including the names it used earlier in development — resolves to the right
-shape. `test/host.smoke.js` stubs the `vscode` module and exercises the real
-collector resolution, NDJSON streaming and restart-after-crash paths against the
-live cluster, so it needs `squeue` and `sinfo` on `PATH`.
+shape. `test/host.smoke.js` stubs the `vscode` module and exercises the real settings
+parsing, collector resolution, NDJSON streaming, merging and
+restart-after-crash paths against the live cluster — including a two-collector
+`ClusterClient` — so it needs `squeue` and `sinfo` on `PATH`.
 
 Then press <kbd>F5</kbd> in VS Code to launch an Extension Development Host.
 
@@ -218,7 +350,7 @@ Then press <kbd>F5</kbd> in VS Code to launch an Extension Development Host.
 **Extensions: Install from VSIX…**, or from a terminal:
 
 ```bash
-code --install-extension slurm-monitor-top-0.5.0.vsix --force
+code --install-extension slurm-monitor-top-0.7.0.vsix --force
 ```
 
 Under Remote - SSH, run that on the cluster so it lands in the remote server's
@@ -248,7 +380,7 @@ For VSCodium and other builds that do not use the Microsoft marketplace, publish
 the same `.vsix` to Open VSX as well:
 
 ```bash
-npx ovsx publish slurm-monitor-top-0.5.0.vsix -p <open-vsx-token>
+npx ovsx publish slurm-monitor-top-0.7.0.vsix -p <open-vsx-token>
 ```
 
 Bump `version` in [package.json](package.json) and add a

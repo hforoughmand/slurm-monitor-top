@@ -173,6 +173,57 @@ DISKS = [
     ("77%", "nfs4", "90T", "70T", "20T", "/archive"),
 ]
 
+# ------------------------------------------------------------- second site
+# A second, smaller cluster, so the multi-server view has two real ones to
+# merge rather than the same one twice. Selected with `FAKE_CLUSTER=hpc2`;
+# everything above describes `login01`.
+#
+# It shares the a100 with login01 on purpose -- that is what makes the merged
+# GPU table add a model up across clusters -- and shares `alice`, so the owner
+# filter has something of its own on both.
+HPC2_JOBS = [
+    ("90118", "alice", "RUNNING", "gpu", "segment-cells", "1", "12", "48G",
+     "cpu=12,mem=48G,node=1,billing=12,gres/gpu:a100=1", "5:12:44", "n01"),
+    ("90121", "greta", "RUNNING", "gpu", "render-volumes", "1", "48", "256G",
+     "cpu=48,mem=256G,node=1,billing=48,gres/gpu:rtx6000=4", "19:38:02", "n02"),
+    ("90124", "hugo", "RUNNING", "gpu", "track-particles", "1", "12", "32G",
+     "cpu=12,mem=32G,node=1,billing=12", "2:04:19", "n01"),
+    ("90131", "alice", "PENDING", "short", "qc-batch", "1", "16", "64G",
+     "cpu=16,mem=64G,node=1,billing=16", "0:00", ""),
+    ("90133", "greta", "PENDING", "gpu", "render-volumes-b", "1", "48", "256G",
+     "cpu=48,mem=256G,node=1,billing=48,gres/gpu:rtx6000=4", "0:00", ""),
+]
+
+HPC2_NODES = [
+    ("n01", "mix", "48", "24/24/0/48", "386000", "201324", "gpu:a100:2(S:0-1)",
+     "gpu:a100:1(IDX:0)", "23.18", "gpu*", "none", "2:12:2"),
+    ("n02", "alloc", "48", "48/0/0/48", "386000", "132880", "gpu:rtx6000:4(S:0-1)",
+     "gpu:rtx6000:4(IDX:0-3)", "47.91", "gpu*", "none", "2:12:2"),
+    ("n03", "idle", "64", "0/64/0/64", "515000", "515000", "(null)",
+     "(null)", "0.02", "short", "none", "2:16:2"),
+    ("n04", "drain", "64", "0/0/64/64", "515000", "515000", "(null)",
+     "(null)", "0.00", "long", "awaiting a firmware update", "2:16:2"),
+]
+
+HPC2_CPU_MODELS = {
+    "n": ("Intel(R) Xeon(R) Gold 6248R CPU @ 3.00GHz", "4000.0000", "1000.0000"),
+}
+
+HPC2_DISKS = [
+    ("31%", "xfs", "400G", "118G", "282G", "/"),
+    ("58%", "nfs4", "8.0T", "4.5T", "3.5T", "/work"),
+    ("83%", "ceph", "120T", "98T", "22T", "/data"),
+]
+
+HPC2_CPU_BUSY = {"90118": 0.81, "90121": 0.35, "90124": 0.09}
+HPC2_MEM_USED = {"90118": 0.66, "90121": 0.52, "90124": 0.14}
+
+if os.environ.get("FAKE_CLUSTER") == "hpc2":
+    JOBS, NODES, DISKS = HPC2_JOBS, HPC2_NODES, HPC2_DISKS
+    CPU_MODELS = HPC2_CPU_MODELS
+    CPU_BUSY, MEM_USED = HPC2_CPU_BUSY, HPC2_MEM_USED
+
+
 JOB_FIELDS = (
     "job_id user state partition name nodes ncpus mem tres time nodelist".split()
 )

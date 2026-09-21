@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
-import { SlurmClient } from './client';
-import { DetailPresentation, JobDetail, NodeDetail } from './types';
+import { ClusterClient } from './cluster';
+import { DetailPresentation, DetailTarget, JobDetail, NodeDetail } from './types';
 
 /** Past this, opening the file whole is a bad idea; the tail is offered first. */
 const LARGE_OUTPUT_BYTES = 25 * 1024 * 1024;
@@ -32,8 +32,9 @@ function humanBytes(size: number): string {
  *   not be pulled through in full just to see the last few lines.
  */
 export async function openJobOutput(
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
+  server: string | undefined,
   jobId: string,
   stream: 'stdout' | 'stderr',
   path: string,
@@ -59,7 +60,7 @@ export async function openJobOutput(
   }
 
   try {
-    const payload = await client.fetchJobOutput(jobId, stream, TAIL_LINES);
+    const payload = await client.fetchJobOutput(server, jobId, stream, TAIL_LINES);
     const tail = payload.output;
     if (!tail.text) {
       vscode.window.showWarningMessage(
@@ -114,11 +115,6 @@ async function canFloat(): Promise<boolean> {
 }
 import { renderHtml } from './view';
 
-interface Target {
-  kind: 'job' | 'node';
-  id: string;
-}
-
 /**
  * Job and node details, away from the sidebar.
  *
@@ -140,42 +136,49 @@ interface Target {
  */
 class DetailWindow {
   private readonly disposables: vscode.Disposable[] = [];
-  private target?: Target;
+  private target?: DetailTarget;
   private timer?: NodeJS.Timeout;
   private busy = false;
 
   constructor(
     private readonly panel: vscode.WebviewPanel,
-    private readonly client: SlurmClient,
+    private readonly client: ClusterClient,
     private readonly log: vscode.OutputChannel,
     private readonly onDisposed: (window: DetailWindow) => void
   ) {
     this.disposables.push(
       panel.webview.onDidReceiveMessage(async (message) => {
+        // A message from the page names its server; when it does not -- an
+        // older page, or a single-server setup -- the window's own target says
+        // which collector this is about.
+        const server = (message.server as string | undefined) ?? this.target?.server;
         if (message.type === 'ready' || message.type === 'refreshDetail') {
           // A detail window opens with no pin list of its own, so seed it from
           // the collector's latest snapshot before the first paint.
           void this.panel.webview.postMessage({
             type: 'pinned',
-            pinned: this.client.latest?.pinned ?? [],
+            server,
+            pinned: this.client.pinnedFor(server),
           });
           await this.load();
         } else if (message.type === 'probeCpu') {
-          await this.probeCpu(String(message.node));
+          await this.probeCpu(server, String(message.node));
         } else if (message.type === 'togglePin') {
-          await this.togglePin(String(message.jobId));
+          await this.togglePin(server, String(message.jobId));
         } else if (message.type === 'copy') {
           await vscode.env.clipboard.writeText(message.text);
           vscode.window.setStatusBarMessage(`Copied ${message.label ?? 'value'}`, 2000);
         } else if (message.type === 'openDetail') {
-          // A job row inside a node's detail view, or vice versa.
-          this.show({ kind: message.kind, id: String(message.id) });
+          // A job row inside a node's detail view, or vice versa -- on the same
+          // server, since that is the only place the row came from.
+          this.show({ server: server ?? '', kind: message.kind, id: String(message.id) });
         } else if (message.type === 'closeDetail') {
           this.panel.dispose();
         } else if (message.type === 'openOutput') {
           await openJobOutput(
             this.client,
             this.log,
+            server,
             String(message.jobId),
             message.stream === 'stderr' ? 'stderr' : 'stdout',
             String(message.path ?? ''),
@@ -195,10 +198,16 @@ class DetailWindow {
   }
 
   /** Point this window at a job or node and start refreshing it. */
-  show(target: Target): void {
+  show(target: DetailTarget): void {
     this.target = target;
-    this.panel.title = target.kind === 'job' ? `Job ${target.id}` : `Node ${target.id}`;
-    void this.panel.webview.postMessage({ type: 'detailTarget', kind: target.kind, id: target.id });
+    this.panel.title = titleFor(this.client, target);
+    void this.panel.webview.postMessage({
+      type: 'detailTarget',
+      server: target.server,
+      serverName: this.client.nameOf(target.server),
+      kind: target.kind,
+      id: target.id,
+    });
     void this.load();
     this.reschedule();
   }
@@ -216,19 +225,28 @@ class DetailWindow {
    * user asked for by clicking, and it must not be dropped because a periodic
    * refresh happens to be in flight.
    */
-  private async probeCpu(node: string): Promise<void> {
-    void this.panel.webview.postMessage({ type: 'cpuProbe', node, state: 'started' });
+  private async probeCpu(server: string | undefined, node: string): Promise<void> {
+    void this.panel.webview.postMessage({ type: 'cpuProbe', server, node, state: 'started' });
     try {
-      const detail = await this.client.fetchDetail('node', node, { probeCpu: true });
+      const detail = await this.client.fetchDetail(
+        { server: server ?? '', kind: 'node', id: node },
+        { probeCpu: true }
+      );
       if (this.target?.kind === 'node' && this.target.id === node) {
-        void this.panel.webview.postMessage({ type: 'detail', detail });
+        void this.panel.webview.postMessage({
+          type: 'detail',
+          server,
+          serverName: this.client.nameOf(server),
+          detail,
+        });
       }
       const error = detail.kind === 'node' ? detail.cpu?.error : undefined;
-      void this.panel.webview.postMessage({ type: 'cpuProbe', node, state: 'done', message: error });
+      void this.panel.webview.postMessage({ type: 'cpuProbe', server, node, state: 'done', message: error });
     } catch (err) {
       this.log.appendLine(`detail window: cpu probe for ${node} failed: ${String(err)}`);
       void this.panel.webview.postMessage({
         type: 'cpuProbe',
+        server,
         node,
         state: 'done',
         message: String(err),
@@ -236,10 +254,10 @@ class DetailWindow {
     }
   }
 
-  private async togglePin(jobId: string): Promise<void> {
+  private async togglePin(server: string | undefined, jobId: string): Promise<void> {
     try {
-      const pinned = await this.client.togglePin(jobId);
-      void this.panel.webview.postMessage({ type: 'pinned', pinned });
+      const pinned = await this.client.togglePin(server, jobId);
+      void this.panel.webview.postMessage({ type: 'pinned', server, pinned });
     } catch (err) {
       this.log.appendLine(`detail window: pin toggle for ${jobId} failed: ${String(err)}`);
       vscode.window.showWarningMessage(`Could not pin job ${jobId}: ${String(err)}`);
@@ -255,9 +273,14 @@ class DetailWindow {
     // this guard the requests would stack up and hammer slurmctld.
     this.busy = true;
     try {
-      const detail: JobDetail | NodeDetail = await this.client.fetchDetail(target.kind, target.id);
+      const detail: JobDetail | NodeDetail = await this.client.fetchDetail(target);
       if (this.target === target) {
-        void this.panel.webview.postMessage({ type: 'detail', detail });
+        void this.panel.webview.postMessage({
+          type: 'detail',
+          server: target.server,
+          serverName: this.client.nameOf(target.server),
+          detail,
+        });
       }
     } catch (err) {
       this.log.appendLine(`detail window: ${target.kind} ${target.id} failed: ${String(err)}`);
@@ -294,11 +317,22 @@ class DetailWindow {
 
 const windows: DetailWindow[] = [];
 
+/**
+ * What to call a window showing this row.
+ *
+ * The server is named only when there is more than one: on a single cluster it
+ * would be noise in every tab title.
+ */
+export function titleFor(client: ClusterClient, target: DetailTarget): string {
+  const what = target.kind === 'job' ? `Job ${target.id}` : `Node ${target.id}`;
+  return client.servers.length > 1 ? `${what} · ${client.nameOf(target.server)}` : what;
+}
+
 export async function openDetailWindow(
   context: vscode.ExtensionContext,
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
-  target: Target,
+  target: DetailTarget,
   newWindow = false,
   forceTab = false
 ): Promise<void> {
@@ -319,7 +353,7 @@ export async function openDetailWindow(
   }
   const panel = vscode.window.createWebviewPanel(
     'slurmTop.detail',
-    target.kind === 'job' ? `Job ${target.id}` : `Node ${target.id}`,
+    titleFor(client, target),
     // A modal takes the active column so it covers what you were looking at,
     // and takes focus so Escape reaches it; a tab opens beside and leaves the
     // keyboard where it was.

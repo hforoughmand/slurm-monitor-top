@@ -41,7 +41,7 @@ and a VS Code extension.
 - Resizable panels (`Alt+←` / `Alt+→`)
 - JSON output (`slurm-top --json`) for other front ends
 - A [VS Code extension](https://github.com/hforoughmand/slurm-monitor-top/tree/main/vscode-extension) with the same panels, in the sidebar
-  or a full editor tab
+  or a full editor tab — and with several clusters merged into one view
 
 ## Feature tour
 
@@ -245,6 +245,18 @@ whichever `slurmTop.detailsIn` says:
 ![Machine details over the dashboard](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-node-detail.png)
 
 ![Job details in a view of their own](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-job-detail.png)
+
+The editor view can watch **several clusters at once**, which the terminal UI
+does not: `slurmTop.servers` is a name → where grid you fill in from VS Code's
+settings editor — `here`, an ssh destination, or a command of your own — with
+one collector process per cluster. A cluster reached over ssh needs nothing
+installed on it: the extension sends its own copy of the collector, runs it in
+memory there and reads the JSON back. Their jobs, machines, GPUs and
+disks arrive in one set of tables, each row tagged with the cluster it came
+from, with a server filter beside the owner and state ones — or, section by
+section, one panel per cluster instead.
+
+![Two clusters in one dashboard](https://raw.githubusercontent.com/hforoughmand/slurm-monitor-top/main/vscode-extension/assets/ext-two-servers.png)
 
 The extension carries its own copy of the collector, so installing the Python
 package is optional for extension users.

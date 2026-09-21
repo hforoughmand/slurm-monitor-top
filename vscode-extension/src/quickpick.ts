@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
-import { SlurmClient } from './client';
-import { Job, JobDetail, NodeDetail } from './types';
+import { ClusterClient } from './cluster';
+import { DetailTarget, Job, JobDetail, NodeDetail } from './types';
 
 /**
  * Job and node details as a floating quick pick.
@@ -164,10 +164,10 @@ function headline(payload: JobDetail | NodeDetail): string {
  * you every few seconds.
  */
 export async function showDetailQuickPick(
-  client: SlurmClient,
+  client: ClusterClient,
   log: vscode.OutputChannel,
-  target: { kind: 'job' | 'node'; id: string },
-  openInTab: (target: { kind: 'job' | 'node'; id: string }) => void
+  target: DetailTarget,
+  openInTab: (target: DetailTarget) => void
 ): Promise<void> {
   const pick = vscode.window.createQuickPick<vscode.QuickPickItem & { row?: Row }>();
   pick.matchOnDescription = true;
@@ -178,13 +178,14 @@ export async function showDetailQuickPick(
   let current = target;
   let rows: Row[] = [];
 
+  const on = client.servers.length > 1 ? ` · ${client.nameOf(target.server)}` : '';
   const load = async () => {
     pick.busy = true;
-    pick.title = current.kind === 'job' ? `Job ${current.id}` : `Node ${current.id}`;
+    pick.title = (current.kind === 'job' ? `Job ${current.id}` : `Node ${current.id}`) + on;
     try {
-      const payload = await client.fetchDetail(current.kind, current.id);
+      const payload = await client.fetchDetail(current);
       rows = payload.kind === 'job' ? jobRows(payload) : nodeRows(payload);
-      pick.title = headline(payload);
+      pick.title = headline(payload) + on;
       pick.items = toItems(rows);
       if (rows.length === 0) {
         pick.items = [{ label: 'Slurm returned no fields', description: 'the job may have finished' }];
@@ -215,8 +216,9 @@ export async function showDetailQuickPick(
       return;
     }
     if (selected.row.jump) {
-      // Follow a job listed on a node without closing and reopening the pick.
-      current = selected.row.jump;
+      // Follow a job listed on a node without closing and reopening the pick;
+      // it is a job on that node, so it lives on the same server.
+      current = { server: current.server, ...selected.row.jump };
       pick.value = '';
       await load();
       return;

@@ -76,11 +76,39 @@ body {
     'gpus    disks';
 }
 
-#root.dashboard > [data-section='summary'] { grid-area: summary; }
-#root.dashboard > [data-section='jobs']    { grid-area: jobs; }
-#root.dashboard > [data-section='nodes']   { grid-area: nodes; }
-#root.dashboard > [data-section='gpus']    { grid-area: gpus; }
-#root.dashboard > [data-section='disks']   { grid-area: disks; }
+#root.dashboard > [data-section='summary'],
+#root.dashboard > [data-group='summary']   { grid-area: summary; }
+#root.dashboard > [data-section='jobs'],
+#root.dashboard > [data-group='jobs']      { grid-area: jobs; }
+#root.dashboard > [data-section='nodes'],
+#root.dashboard > [data-group='nodes']     { grid-area: nodes; }
+#root.dashboard > [data-section='gpus'],
+#root.dashboard > [data-group='gpus']      { grid-area: gpus; }
+#root.dashboard > [data-section='disks'],
+#root.dashboard > [data-group='disks']     { grid-area: disks; }
+
+/* A section shown per server: its panels share the one area the section owns,
+   side by side in the dashboard and stacked in the narrow view. */
+.panel-group {
+  display: flex;
+  gap: var(--gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+.panel-group > .panel {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* Stacked in a narrow column. `flex: 0 0 auto` so the group keeps the height
+   its panels need and the sidebar scrolls, rather than the group shrinking and
+   squeezing the second cluster's table down to one row. */
+#root.sidebar .panel-group {
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 10px;
+}
 
 /* One column is too narrow for a grid; stack and let each panel scroll. */
 @media (max-width: 720px) {
@@ -587,4 +615,58 @@ td.dim {
 
 .error-text {
   color: var(--vscode-charts-red, #f14c4c);
+}
+
+/* ------------------------------------------------------------- many servers */
+
+/* Which cluster a row is from. Muted, because it repeats down the column and
+   the row's own numbers are what you came to read. */
+td.server-cell {
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.summary-body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* One line per cluster under a merged summary: a server that stopped answering
+   must not vanish into totals that still look plausible. */
+.server-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 0 8px 6px;
+  font-size: calc(var(--vscode-font-size) - 2px);
+  color: var(--vscode-descriptionForeground);
+}
+
+.server-chip {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 3px;
+  padding: 0 5px;
+  white-space: nowrap;
+}
+
+.server-note {
+  padding: 0 8px 6px;
+  font-size: calc(var(--vscode-font-size) - 2px);
+}
+
+/* A header button that should read as a link rather than as an action. */
+button.linkish {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+button.linkish:hover {
+  text-decoration: underline;
 }
