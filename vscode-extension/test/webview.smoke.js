@@ -231,6 +231,70 @@ function run(variant, sections, detailsIn) {
     }
   }
 
+  // The machines table filters on what a machine is, the way the jobs table
+  // filters on whose a job is.
+  if (nodesPanel) {
+    const ids = () => Array.from(nodesPanel.querySelectorAll('tbody tr')).map((tr) => tr.dataset.id);
+    const selects = Array.from(nodesPanel.querySelectorAll('select'));
+    const pick = (node, value) => {
+      node.value = value;
+      node.dispatchEvent(new window.Event('change'));
+    };
+    check('nodes panel has state, partition and GPU menus', selects.length === 3, String(selects.length));
+    const [stateSelect, partitionSelect, gpuSelect] = selects;
+
+    // The partition menu is stocked from the snapshot, and sinfo's trailing
+    // `*` on the default partition is not part of the name.
+    const partitions = Array.from(partitionSelect.options).map((o) => o.value);
+    check('partition menu lists the partitions in the snapshot',
+      partitions.join(',') === 'all,cpu,gpu', partitions.join(','));
+
+    pick(stateSelect, 'idle');
+    check('no node is idle in the fixture', ids().length === 0, ids().join(','));
+    pick(stateSelect, 'unavailable');
+    check('the drained node is the unavailable one', ids().join(',') === 'cpu03', ids().join(','));
+    pick(stateSelect, 'mixed');
+    check('a mixed node is not counted as unavailable', ids().join(',') === 'gpu01', ids().join(','));
+    pick(stateSelect, 'all');
+
+    pick(partitionSelect, 'cpu');
+    check('partition filter applies', ids().join(',') === 'cpu01,cpu03', ids().join(','));
+    pick(partitionSelect, 'gpu');
+    check('the default partition matches without its star', ids().join(',') === 'gpu01', ids().join(','));
+    pick(partitionSelect, 'all');
+
+    pick(gpuSelect, 'free');
+    check('GPUs-free filter keeps only the node with one spare',
+      ids().join(',') === 'gpu01', ids().join(','));
+    pick(gpuSelect, 'none');
+    check('no-GPU filter keeps the plain machines', ids().join(',') === 'cpu01,cpu03', ids().join(','));
+    pick(gpuSelect, 'all');
+
+    const search = nodesPanel.querySelector("input[type='search']");
+    search.value = 'disk full';
+    search.dispatchEvent(new window.Event('input'));
+    check('node search reaches the drain reason', ids().join(',') === 'cpu03', ids().join(','));
+    search.value = 'epyc';
+    search.dispatchEvent(new window.Event('input'));
+    check('node search reaches the CPU model', ids().join(',') === 'gpu01', ids().join(','));
+    search.value = '';
+    search.dispatchEvent(new window.Event('input'));
+    check('clearing the search restores every machine', ids().length === snapshot.nodes.length);
+
+    // A count of "2/3" is the only sign that a filter is on once the strip
+    // has scrolled out of view.
+    pick(gpuSelect, 'none');
+    check('a filtered nodes panel counts shown out of total',
+      nodesPanel.querySelector('.panel-count').textContent === '2/3',
+      nodesPanel.querySelector('.panel-count').textContent);
+    pick(gpuSelect, 'all');
+    check('an unfiltered nodes panel counts plainly',
+      nodesPanel.querySelector('.panel-count').textContent === '3',
+      nodesPanel.querySelector('.panel-count').textContent);
+
+    check('node filters are persisted', (window.eval('__state') || {}).nodeGpuFilter === 'all');
+  }
+
   // Collapsing a sidebar panel must hide its body and survive as state.
   if (variant === 'sidebar' && nodesPanel) {
     const title = nodesPanel.querySelector('.panel-title');

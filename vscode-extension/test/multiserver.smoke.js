@@ -195,6 +195,27 @@ function runMerged() {
   serverSelect.value = 'all';
   serverSelect.dispatchEvent(new window.Event('change'));
 
+  // The machines table gets the same cluster menu, ahead of its own filters.
+  const nodesPanel = doc.querySelector("[data-section='nodes']");
+  const nodeSelects = nodesPanel.querySelectorAll('.panel-head select');
+  check('the nodes panel gains a server filter too', nodeSelects.length === 4,
+    String(nodeSelects.length));
+  const nodeServerSelect = nodeSelects[0];
+  check('it lists every server plus "all"',
+    Array.from(nodeServerSelect.options).map((o) => o.value).join(',') === 'all,alpha,beta',
+    Array.from(nodeServerSelect.options).map((o) => o.value).join(','));
+  nodeServerSelect.value = 'alpha';
+  nodeServerSelect.dispatchEvent(new window.Event('change'));
+  check('filtering machines by server leaves only that cluster',
+    Array.from(nodesPanel.querySelectorAll('tbody tr')).every((tr) => tr.dataset.server === 'alpha') &&
+    nodesPanel.querySelectorAll('tbody tr').length === base.nodes.length,
+    String(nodesPanel.querySelectorAll('tbody tr').length));
+  nodeServerSelect.value = 'all';
+  nodeServerSelect.dispatchEvent(new window.Event('change'));
+  check('the node and job server filters are independent',
+    nodesPanel.querySelectorAll('tbody tr').length === snapshot.nodes.length &&
+    jobsPanel.querySelectorAll('tbody tr').length === snapshot.jobs.length);
+
   // "me" means a different account on each cluster.
   const ownerSelect = selects[1];
   ownerSelect.value = 'me';

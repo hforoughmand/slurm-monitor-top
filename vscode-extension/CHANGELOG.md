@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- **Filter the machines table, the way the jobs table filters.** The nodes
+  panel gains the same strip of menus: which cluster, what the machine is
+  doing (idle, mixed, allocated, drained/down), which partition it belongs to,
+  whether it has GPUs and whether any are free, and a search box over the
+  name, state, drain reason, partition, GRES and CPU model. The count in the
+  panel title reads `4/29` while a filter is on, so a narrowed table never
+  looks like a short cluster. The choices are remembered across reloads, and
+  the partition menu restocks itself as clusters report in.
+
+### Fixed
+
+- **Columns lined up with the wrong headers in a narrow view.** Cells drawing
+  a bar were laid out with `display: flex`, which overrides `display:
+  table-cell` and takes the cell out of the table: the browser wrapped it in
+  an anonymous cell, rows split over two lines and every value drifted one
+  heading to the left. In the sidebar that made a node's `GPU U/T` read as its
+  `MEM FREE` -- a machine with one idle GPU showed `0/1` under MEM FREE. The
+  bar is laid out inline now, so the cell stays in its column at any width.
+
+This supersedes 0.7.0, 0.7.1 and 0.7.2, which were uploaded but never came out
+of the Marketplace's validation pipeline and so were never served.
+
 ## 0.7.1
 
 Same extension as 0.7.0, republished under a new number: the 0.7.0 upload never

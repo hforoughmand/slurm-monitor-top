@@ -53,6 +53,16 @@
     stateFilter: saved.stateFilter || 'all',
     serverFilter: saved.serverFilter || 'all',
     search: saved.search || '',
+    /**
+     * The same idea as the job filters, for machines: which cluster, what the
+     * node is doing, which partition it belongs to, whether it has a GPU going
+     * spare, and free text over everything else.
+     */
+    nodeServerFilter: saved.nodeServerFilter || 'all',
+    nodeStateFilter: saved.nodeStateFilter || 'all',
+    nodePartitionFilter: saved.nodePartitionFilter || 'all',
+    nodeGpuFilter: saved.nodeGpuFilter || 'all',
+    nodeSearch: saved.nodeSearch || '',
     sort: Object.assign(
       { jobs: { key: 'default', desc: false }, nodes: { key: 'name', desc: false }, gpus: { key: 'type', desc: false }, disks: { key: 'usage', desc: true } },
       saved.sort || {}
@@ -80,6 +90,11 @@
       stateFilter: state.stateFilter,
       serverFilter: state.serverFilter,
       search: state.search,
+      nodeServerFilter: state.nodeServerFilter,
+      nodeStateFilter: state.nodeStateFilter,
+      nodePartitionFilter: state.nodePartitionFilter,
+      nodeGpuFilter: state.nodeGpuFilter,
+      nodeSearch: state.nodeSearch,
       sort: state.sort,
       selected: state.selected,
       collapsed: state.collapsed,
@@ -423,6 +438,75 @@
       .includes(needle);
   }
 
+  /** Every partition named by a node, with sinfo's default-partition `*` off. */
+  function partitionsOf(nodes) {
+    const seen = new Set();
+    for (const node of nodes || []) {
+      for (const part of partitionsOn(node)) seen.add(part);
+    }
+    return Array.from(seen).sort();
+  }
+
+  /** A node's partitions; sinfo names several as one comma-separated cell. */
+  function partitionsOn(node) {
+    return String(node.partition || '')
+      .split(',')
+      .map((part) => part.trim().replace(/\*$/, ''))
+      .filter(Boolean);
+  }
+
+  function matchesNodeServer(node) {
+    if (state.nodeServerFilter === 'all') return true;
+    return serverOf(node) === state.nodeServerFilter;
+  }
+
+  /**
+   * What the machine is doing, in the four buckets worth asking about.
+   *
+   * Slurm decorates a state with flags -- `idle*` for an unreachable node,
+   * `mixed+drain` for one draining while it still has work -- so these match
+   * inside the string rather than against it. "unavailable" is checked first:
+   * a draining node is not somewhere you can land work, whatever else it says.
+   */
+  function matchesNodeState(node) {
+    if (state.nodeStateFilter === 'all') return true;
+    const s = String(node.state || '').toLowerCase();
+    const unavailable = /drain|down|fail|err|maint|unk|\*/.test(s);
+    if (state.nodeStateFilter === 'unavailable') return unavailable;
+    if (unavailable) return false;
+    if (state.nodeStateFilter === 'idle') return s.indexOf('idle') >= 0;
+    if (state.nodeStateFilter === 'mixed') return s.indexOf('mix') >= 0;
+    if (state.nodeStateFilter === 'alloc') return s.indexOf('alloc') >= 0;
+    return true;
+  }
+
+  function matchesNodePartition(node) {
+    if (state.nodePartitionFilter === 'all') return true;
+    return partitionsOn(node).indexOf(state.nodePartitionFilter) >= 0;
+  }
+
+  function matchesNodeGpu(node) {
+    if (state.nodeGpuFilter === 'all') return true;
+    if (state.nodeGpuFilter === 'gpu') return (Number(node.gpu_total) || 0) > 0;
+    if (state.nodeGpuFilter === 'free') return (Number(node.gpu_free) || 0) > 0;
+    if (state.nodeGpuFilter === 'none') return (Number(node.gpu_total) || 0) === 0;
+    return true;
+  }
+
+  /** Free text over a node's name, state, partition and hardware. */
+  function matchesNodeSearch(node) {
+    const needle = state.nodeSearch.trim().toLowerCase();
+    if (!needle) return true;
+    const cpu = node.cpu || {};
+    return [
+      node.name, node.state, node.reason, node.partition, node.gres,
+      (node.gpu_types || []).join(' '), cpu.model, cpu.summary, node.server_name,
+    ]
+      .join(' ')
+      .toLowerCase()
+      .includes(needle);
+  }
+
   /**
    * Move pinned jobs to the front, keeping the order within both groups.
    *
@@ -488,7 +572,13 @@
         (j) => onlyHere(j) && matchesServer(j) && matchesOwner(j) && matchesState(j) && matchesSearch(j)
       );
     }
-    if (section === 'nodes') return (state.snapshot.nodes || []).filter(onlyHere);
+    if (section === 'nodes') {
+      return (state.snapshot.nodes || []).filter(
+        (n) =>
+          onlyHere(n) && matchesNodeServer(n) && matchesNodeState(n) &&
+          matchesNodePartition(n) && matchesNodeGpu(n) && matchesNodeSearch(n)
+      );
+    }
     if (section === 'disks') return (state.snapshot.disks || []).filter(onlyHere);
     if (section === 'gpus') {
       const servers = serverList().filter((s) => !panel.server || s.id === panel.server);
@@ -610,11 +700,17 @@
     const empty = el('div', { class: 'empty hidden', text: 'Nothing to show' });
     const body = el('div', { class: 'panel-body' }, [table, empty]);
 
-    const controls = entry.section === 'jobs' ? jobControls(entry) : [];
-    const { panel, count } = makePanel(entry, panelTitle(entry), controls, body);
+    const built =
+      entry.section === 'jobs' ? { controls: jobControls(entry) }
+      : entry.section === 'nodes' ? nodeControls(entry)
+      : { controls: [] };
+    const { panel, count } = makePanel(entry, panelTitle(entry), built.controls, body);
     panels[entry.key] = {
       key: entry.key, section: entry.section, server: entry.server,
       panel, count, tbody, headers, columns, table, empty, spec,
+      // Partitions are not known until a snapshot arrives, so the nodes panel
+      // hands back a way to restock that one menu without a relayout.
+      refreshFilters: built.refresh || null,
       rowNodes: new Map(), rowData: new Map(),
     };
     return panel;
@@ -685,6 +781,100 @@
     controls.push(search);
 
     return controls;
+  }
+
+  /**
+   * The jobs panel's filter strip, for machines.
+   *
+   * Returns the partition menu alongside the controls: its options come from
+   * the snapshot rather than the config, so it has to be restocked as clusters
+   * report in, and rebuilding the whole panel for that would lose the user's
+   * scroll position and selection.
+   */
+  function nodeControls(entry) {
+    const controls = [];
+
+    const select = (title, key, options, onPick) => {
+      const node = el('select', {
+        title,
+        onchange: (e) => {
+          state[key] = e.target.value;
+          persist();
+          updateSection('nodes');
+        },
+      });
+      for (const [value, label] of options) {
+        node.appendChild(el('option', { value, text: label }));
+      }
+      node.value = state[key];
+      controls.push(node);
+      if (onPick) onPick(node);
+      return node;
+    };
+
+    // Only on a merged panel: one that already shows a single cluster is its
+    // own server filter.
+    if (!entry.server && manyServers()) {
+      const options = [['all', 'all servers']].concat(
+        serverList().map((s) => [s.id, s.name || s.id])
+      );
+      if (!serverList().some((s) => s.id === state.nodeServerFilter)) state.nodeServerFilter = 'all';
+      select('Which cluster to show machines from', 'nodeServerFilter', options);
+    }
+
+    select('What the machine is doing', 'nodeStateFilter', [
+      ['all', 'any state'],
+      ['idle', 'idle'],
+      ['mixed', 'mixed'],
+      ['alloc', 'allocated'],
+      ['unavailable', 'drained / down'],
+    ]);
+
+    let partitionSelect = null;
+    select('Which partition the machine belongs to', 'nodePartitionFilter',
+      [['all', 'all partitions']], (node) => { partitionSelect = node; });
+
+    select('Whether the machine has GPUs, and any going spare', 'nodeGpuFilter', [
+      ['all', 'any GPUs'],
+      ['gpu', 'has GPUs'],
+      ['free', 'GPUs free'],
+      ['none', 'no GPUs'],
+    ]);
+
+    const search = el('input', {
+      type: 'search',
+      placeholder: 'search',
+      title: 'Filter by name, state, reason, partition, GRES or CPU model',
+      oninput: (e) => {
+        state.nodeSearch = e.target.value;
+        persist();
+        updateSection('nodes');
+      },
+    });
+    /** @type {HTMLInputElement} */ (search).value = state.nodeSearch;
+    controls.push(search);
+
+    /** Restock the partition menu, keeping the choice if it still exists. */
+    const refresh = () => {
+      if (!partitionSelect) return;
+      const nodes = (state.snapshot && state.snapshot.nodes) || [];
+      const wanted = partitionsOf(
+        entry.server ? nodes.filter((n) => serverOf(n) === entry.server) : nodes
+      );
+      const have = Array.from(partitionSelect.options).slice(1).map((o) => o.value);
+      if (have.length === wanted.length && have.every((v, i) => v === wanted[i])) return;
+      const chosen = state.nodePartitionFilter;
+      while (partitionSelect.options.length > 1) partitionSelect.remove(1);
+      for (const part of wanted) {
+        partitionSelect.appendChild(el('option', { value: part, text: part }));
+      }
+      // A partition that has gone away takes its filter with it, rather than
+      // leaving the panel mysteriously empty.
+      state.nodePartitionFilter = wanted.indexOf(chosen) >= 0 ? chosen : 'all';
+      partitionSelect.value = state.nodePartitionFilter;
+    };
+
+    return { controls, refresh };
   }
 
   function makeSummarySection(entry) {
@@ -775,6 +965,10 @@
     }
     const section = panel.section;
 
+    // Before the rows, so a partition that just appeared can be chosen and one
+    // that just went away stops narrowing the table to nothing.
+    if (panel.refreshFilters) panel.refreshFilters();
+
     const rows = sortRows(section, rowsFor(panel), panel.columns);
     state.visible[key] = rows;
 
@@ -818,6 +1012,9 @@
     if (section === 'jobs') {
       const all = (state.snapshot.jobs || []).filter((j) => !panel.server || serverOf(j) === panel.server);
       panel.count.textContent = `${rows.length}/${all.length}`;
+    } else if (section === 'nodes') {
+      const all = (state.snapshot.nodes || []).filter((n) => !panel.server || serverOf(n) === panel.server);
+      panel.count.textContent = rows.length === all.length ? String(all.length) : `${rows.length}/${all.length}`;
     } else if (section === 'gpus') {
       const free = rows.reduce((sum, row) => sum + (Number(row.free_est) || 0), 0);
       const total = rows.reduce((sum, row) => sum + (Number(row.total) || 0), 0);

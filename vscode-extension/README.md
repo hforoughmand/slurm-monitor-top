@@ -24,7 +24,7 @@ can be [more than one cluster](#watching-more-than-one-cluster).
 | | |
 |---|---|
 | Jobs | id, user, state, partition, name, nodes, CPUs, GPUs, memory, elapsed time, node list. Filter by owner (all / me / others), by state, or by free text. Click a column to sort, or the star to pin. |
-| Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, GPU types, and the CPU model. CPU, load and memory each get a bar. |
+| Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, GPU types, and the CPU model. CPU, load and memory each get a bar. Filter by state (idle / mixed / allocated / drained or down), by partition, by GPUs (has some / some free / none), or by free text over the name, drain reason, GRES and CPU model. |
 | GPUs | per type: total, active, reserved, free. Open one to list the jobs holding it. |
 | Disks | `df -h` usage with a bar, mount point, size, used, free, filesystem type. Size columns sort by real bytes, so `2T` sorts above `176G`. |
 | Summary | running and pending jobs, GPUs, CPUs and memory, split all / me / others. |
@@ -115,7 +115,8 @@ last two rows of that table.
 
 By default the clusters are merged: one jobs table, one machines table, one GPU
 table and one disks table covering all of them, each with a **SERVER** column,
-and the jobs panel gains a server filter beside the owner and state ones. The
+and the jobs and machines panels each gain a server filter beside their own
+ones, so you can narrow the jobs to one cluster and the machines to another. The
 summary box is the exception — there is one per cluster, because a box of
 totals that does not say whose they are is the one thing worth keeping apart.
 
@@ -329,8 +330,8 @@ jsdom against a fixture snapshot and checks that tables fill, filters and sorts
 apply, rows update in place rather than duplicating, and the detail overlays
 render. `test/multiserver.smoke.js` drives the same script against a snapshot carrying
 two clusters that share job ids and node names, and checks the SERVER column,
-the server filter, per-server pins and owner filters, the per-server panels and
-that every click carries its server back to the host.
+the job and machine server filters, per-server pins and owner filters, the
+per-server panels and that every click carries its server back to the host.
 `test/quickpick.smoke.js` stubs VS Code's quick pick and checks the
 detail popup's field list, grouping, copy-on-Enter, the node-to-job jump and its
 error handling. `test/detail.smoke.js` checks that the floating window is

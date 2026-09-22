@@ -348,10 +348,23 @@ tbody tr.selected .state-other {
 .bar.warn > span { background: var(--vscode-charts-yellow, #d6a72c); }
 .bar.high > span { background: var(--vscode-charts-red, #f14c4c); }
 
+/* A bar cell has to stay a real table cell. `display: flex` overrides
+   `display: table-cell`, so the browser wraps the cell in an anonymous one and
+   the column stops lining up with its header -- in a narrow sidebar that put
+   every value one heading to the left of where it belonged, and a node's
+   GPU U/T was read as its MEM FREE. Laying the bar out inline keeps the cell
+   in its column at any width. */
 td.with-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  white-space: nowrap;
+  /* The bar sits at the left edge whatever the column's alignment, which is
+     what the flex box used to do. */
+  text-align: left;
+}
+
+td.with-bar > .bar {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 6px;
 }
 
 /* ---------------------------------------------------------------- summary */
@@ -533,7 +546,13 @@ td.link:hover {
   white-space: nowrap;
 }
 
+/* The detail view's gauges are one per row and stretch to fill their cell,
+   and that table has no header row to line up with, so they keep the flex box
+   the dense tables can no longer use. */
 .metrics td.with-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   width: 1%;
   min-width: 140px;
 }
