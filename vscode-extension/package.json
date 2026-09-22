@@ -2,7 +2,7 @@
   "name": "slurm-monitor-top",
   "displayName": "Slurm Monitor (slurm-top)",
   "description": "htop-style live view of Slurm jobs, nodes, GPUs and disks, in the sidebar or a full editor tab.",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "license": "MIT",
   "publisher": "hforoughmand",
   "icon": "media/icon.png",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+Same extension as 0.7.0, republished under a new number: the 0.7.0 upload never
+came out of the Marketplace's validation pipeline, so it was never served.
+
 ## 0.7.0
 
 ### Added
