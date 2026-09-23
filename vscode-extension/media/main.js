@@ -68,10 +68,8 @@
     gpuTypeFilter: saved.gpuTypeFilter || 'all',
     gpuFreeFilter: saved.gpuFreeFilter || 'all',
     gpuSearch: saved.gpuSearch || '',
-    /** Which columns each table shows, as the settings page chose them. */
+    /** Only the columns the user set on the settings page, per section. */
     columns: /** @type {Record<string, Record<string, boolean>>} */ ({}),
-    /** Sections whose columns the user picked, so compact may stop narrowing. */
-    columnsChosen: /** @type {Record<string, boolean>} */ ({}),
     sort: Object.assign(
       { jobs: { key: 'default', desc: false }, nodes: { key: 'name', desc: false }, gpus: { key: 'type', desc: false }, disks: { key: 'usage', desc: true } },
       saved.sort || {}
@@ -493,9 +491,10 @@
    */
   function columnShown(section, column) {
     const chosen = state.columns[section] || {};
-    if (typeof chosen[column.key] === 'boolean') {
-      return chosen[column.key] && !(compact && column.compactHide && !state.columnsChosen[section]);
-    }
+    // Only columns the user actually set arrive here, and a setting is an
+    // instruction: tick USER and it shows in the sidebar too, where width
+    // would otherwise have dropped it. Everything else keeps the defaults.
+    if (typeof chosen[column.key] === 'boolean') return chosen[column.key];
     if (column.off) return false;
     return !(compact && column.compactHide);
   }
@@ -791,14 +790,23 @@
     return `${manyServers() ? 'many' : 'one'}:${plan.map((entry) => entry.key).join('|')}:${columns}`;
   }
 
+  /**
+   * A bar, with room for its own number.
+   *
+   * The figure sits on the bar rather than beside it: a table of machines has
+   * a bar in half its columns, and 56px of track plus the number again was
+   * costing the width that pushed MEM FREE and the GPU columns off the side of
+   * the panel.
+   */
   function bar() {
-    return el('span', { class: 'bar' }, [el('span', {})]);
+    return el('span', { class: 'bar' }, [el('span', { class: 'fill' })]);
   }
 
   function setBar(node, fraction) {
     const pct = Math.max(0, Math.min(1, Number(fraction) || 0));
     node.className = pct >= 0.9 ? 'bar high' : pct >= 0.7 ? 'bar warn' : 'bar';
-    /** @type {HTMLElement} */ (node.firstChild).style.width = (pct * 100).toFixed(1) + '%';
+    const fill = node.querySelector('.fill') || node.firstChild;
+    /** @type {HTMLElement} */ (fill).style.width = (pct * 100).toFixed(1) + '%';
   }
 
   function makePanel(entry, title, controls, body) {
@@ -1134,11 +1142,24 @@
         });
       }
     }
+    // How full the cluster is, which a table of totals cannot say: 400 CPUs
+    // busy is either most of the machine or a corner of it, and only a bar
+    // against the capacity says which.
+    const gauges = el('div', { class: 'summary-gauges' });
+    const bars = {};
+    for (const [key, label] of [['cpus', 'CPU'], ['mem', 'MEM'], ['gpus', 'GPU']]) {
+      const gauge = bar();
+      gauge.appendChild(el('span', { class: 'bar-label' }));
+      gauges.appendChild(el('span', { class: 'gauge-label', text: label }));
+      gauges.appendChild(el('span', { class: 'gauge with-bar' }, [gauge]));
+      bars[key] = gauge;
+    }
+
     // A merged box hides which clusters it added up, and a sick one would go
     // unnoticed behind the totals, so the servers are listed under it.
     const chips = el('div', { class: 'server-chips hidden' });
     const note = el('div', { class: 'server-note hidden' });
-    const body = el('div', { class: 'summary-body' }, [grid, chips, note]);
+    const body = el('div', { class: 'summary-body' }, [grid, gauges, chips, note]);
     // One way in to the server list is enough, so only the first box carries it.
     const first = !entry.server || (serverList()[0] || {}).id === entry.server;
     const manage = first
@@ -1150,7 +1171,7 @@
         })
       : null;
     const { panel, count, titleEl } = makePanel(entry, 'Cluster', [manage], body);
-    panels[entry.key] = { key: entry.key, section: 'summary', server: entry.server, panel, count, cells, chips, note, title: titleEl };
+    panels[entry.key] = { key: entry.key, section: 'summary', server: entry.server, panel, count, cells, bars, gauges, chips, note, title: titleEl };
     return panel;
   }
 
@@ -1284,13 +1305,16 @@
         td.addEventListener('dblclick', (event) => event.stopPropagation());
       }
       let barNode = null;
+      const text = document.createTextNode('');
       if (column.bar) {
         td.classList.add('with-bar');
         barNode = bar();
+        // Inside the bar, over the fill, rather than after it.
+        barNode.appendChild(el('span', { class: 'bar-label' }, [text]));
         td.appendChild(barNode);
+      } else {
+        td.appendChild(text);
       }
-      const text = document.createTextNode('');
-      td.appendChild(text);
       tr.appendChild(td);
       return { td, text, barNode, column };
     });
@@ -1322,6 +1346,47 @@
     return 'paused';
   }
 
+  /**
+   * How much of the cluster is in use, drawn against what it has.
+   *
+   * The capacity comes from the machines rather than from the totals: Slurm's
+   * summary says how many cores are allocated but never how many exist, and a
+   * fraction is the whole point of a bar. A box covering several clusters adds
+   * their machines up, which is the same question asked of a bigger cluster.
+   */
+  function updateSummaryGauges(panel) {
+    const nodes = (state.snapshot.nodes || []).filter(
+      (n) => !panel.server || serverOf(n) === panel.server
+    );
+    const sum = (pick) => nodes.reduce((total, n) => total + (Number(pick(n)) || 0), 0);
+    const capacity = {
+      cpus: { used: sum((n) => n.cpus_alloc_n), total: sum((n) => n.cpus_total_n), format: String },
+      mem: {
+        used: sum((n) => n.mem_total_mb) - sum((n) => n.mem_free_mb),
+        total: sum((n) => n.mem_total_mb),
+        format: formatMb,
+      },
+      gpus: { used: sum((n) => n.gpu_used), total: sum((n) => n.gpu_total), format: String },
+    };
+
+    let any = false;
+    for (const key of Object.keys(capacity)) {
+      const { used, total, format } = capacity[key];
+      const gauge = panel.bars[key];
+      if (!gauge) continue;
+      setBar(gauge, total ? used / total : 0);
+      const label = gauge.querySelector('.bar-label');
+      // A cluster with no GPUs should say so rather than draw an empty bar.
+      const text = total ? `${format(used)} / ${format(total)}` : 'none';
+      if (label && label.textContent !== text) label.textContent = text;
+      gauge.parentNode.classList.toggle('empty', !total);
+      if (total) any = true;
+    }
+    // Nothing to draw before the first snapshot, or from a collector that
+    // reports no machines at all.
+    panel.gauges.classList.toggle('hidden', !any);
+  }
+
   function updateSummary(key) {
     const panel = panels[key];
     if (!panel || !state.snapshot) return;
@@ -1338,6 +1403,8 @@
         });
       }
     }
+
+    updateSummaryGauges(panel);
 
     const servers = serverList();
     if (server) {
@@ -1918,7 +1985,6 @@
         if (Array.isArray(message.servers)) state.servers = message.servers;
         if (message.merge) state.merge = Object.assign({}, state.merge, message.merge);
         if (message.columns) state.columns = message.columns;
-        if (message.columnsChosen) state.columnsChosen = message.columnsChosen;
         if (isDetailView) break;
         if (Array.isArray(message.sections)) state.sections = message.sections;
         relayoutIfNeeded();

@@ -329,6 +329,8 @@ tbody tr.selected .state-other {
 
 /* ------------------------------------------------------------------- bars */
 
+/* The track. Transparency belongs to the track and the fill, never to the
+   whole bar: the number rides on top of it and has to stay readable. */
 .bar {
   position: relative;
   min-width: 56px;
@@ -338,15 +340,15 @@ tbody tr.selected .state-other {
   opacity: 0.35;
 }
 
-.bar > span {
+.bar > .fill {
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: 2px;
   background: var(--vscode-charts-blue, #3794ff);
 }
 
-.bar.warn > span { background: var(--vscode-charts-yellow, #d6a72c); }
-.bar.high > span { background: var(--vscode-charts-red, #f14c4c); }
+.bar.warn > .fill { background: var(--vscode-charts-yellow, #d6a72c); }
+.bar.high > .fill { background: var(--vscode-charts-red, #f14c4c); }
 
 /* A bar cell has to stay a real table cell. `display: flex` overrides
    `display: table-cell`, so the browser wraps the cell in an anonymous one and
@@ -356,15 +358,39 @@ tbody tr.selected .state-other {
    in its column at any width. */
 td.with-bar {
   white-space: nowrap;
-  /* The bar sits at the left edge whatever the column's alignment, which is
-     what the flex box used to do. */
-  text-align: left;
+  text-align: right;
 }
 
+/* In a table the bar carries its own number, so it is a box with a label in
+   it rather than a rule with a figure after it. That is one column's width
+   instead of two, which is what lets a machines table fit its panel. */
 td.with-bar > .bar {
   display: inline-block;
   vertical-align: middle;
-  margin-right: 6px;
+  min-width: 68px;
+  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+  height: calc(var(--row-height) - 4px);
+  line-height: calc(var(--row-height) - 4px);
+  padding: 0 5px;
+  /* The track is dim so the number can sit on it at full strength. */
+  opacity: 1;
+  background: var(--vscode-progressBar-background, rgba(128, 128, 128, 0.25));
+}
+
+/* Solid enough that red reads as red rather than mauve -- at 45% the warning
+   colours turned to olive and pink and stopped meaning anything. */
+td.with-bar > .bar > .fill {
+  opacity: 0.85;
+}
+
+/* The number sits on both the filled and the empty part of the bar, so it is
+   lifted off whichever it lands on rather than tinted to suit one. */
+td.with-bar > .bar > .bar-label {
+  position: relative;
+  z-index: 1;
+  text-shadow:
+    0 0 3px var(--vscode-editorWidget-background, var(--vscode-editor-background)),
+    0 0 2px var(--vscode-editorWidget-background, var(--vscode-editor-background));
 }
 
 /* ---------------------------------------------------------------- summary */
@@ -565,12 +591,21 @@ td.link:hover {
   padding-left: 12px;
 }
 
-/* The bar is the row's own gauge, not a cell of a dense table, so it earns a
-   little more height than the one in the job list. */
-.metrics .bar {
+/* The bar is the row's own gauge, not a cell of a dense table: it stretches,
+   carries no number of its own -- the figures are spelled out in the columns
+   beside it -- and so keeps the plain dim rule the tables no longer use.
+   Specific enough to outrank the `td.with-bar > .bar` box above. */
+.metrics td.with-bar > .bar {
   width: 100%;
+  min-width: 0;
   height: 10px;
+  line-height: 10px;
+  padding: 0;
   opacity: 0.5;
+}
+
+.metrics td.with-bar > .bar > .fill {
+  opacity: 1;
 }
 
 .metrics td.numeric {
@@ -688,4 +723,38 @@ button.linkish {
 
 button.linkish:hover {
   text-decoration: underline;
+}
+
+/* ------------------------------------------------- cluster utilisation bars */
+
+/* Under the table of totals: how full the cluster is, as three bars against
+   what it actually has. The label column is as narrow as its widest word. */
+.summary-gauges {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 3px 8px;
+  padding: 4px 8px 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: calc(var(--vscode-font-size) - 1px);
+}
+
+.summary-gauges.hidden {
+  display: none;
+}
+
+.summary-gauges .gauge-label {
+  color: var(--vscode-descriptionForeground);
+}
+
+/* These bars stretch across the box rather than sizing to their number. */
+.summary-gauges .gauge > .bar {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  text-align: right;
+}
+
+.summary-gauges .gauge.empty > .bar {
+  color: var(--vscode-descriptionForeground);
 }

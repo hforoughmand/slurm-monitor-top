@@ -74,41 +74,39 @@ export function settingKey(section: string): string {
 
 export interface ColumnConfig {
   columns: ColumnSettings;
-  /**
-   * Sections the user has actually configured.
-   *
-   * The sidebar drops wide columns to fit, which is right until someone has
-   * gone and ticked the ones they want: from then on their choice is the whole
-   * answer and the narrow view stops editing it.
-   */
-  chosen: Record<string, boolean>;
 }
 
+/**
+ * What the user actually said, not what they said plus every default.
+ *
+ * Only the columns a person has set are sent, because the webview treats a
+ * setting as an instruction that outranks the narrow view's own trimming: tick
+ * `user` and it appears in the sidebar, where width would otherwise have
+ * dropped it. Sending the merged defaults too would make every default-on
+ * column an instruction as well, and asking for one column would drag the
+ * whole table into a 300px panel.
+ */
 export function readColumnSettings(): ColumnConfig {
   const settings = vscode.workspace.getConfiguration('slurmTop');
   const columns: ColumnSettings = {};
-  const chosen: Record<string, boolean> = {};
 
   for (const section of Object.keys(COLUMN_DEFAULTS)) {
-    const key = settingKey(section);
     const defaults = COLUMN_DEFAULTS[section];
-    const configured = settings.get<Record<string, boolean>>(key, {}) ?? {};
-    const merged: Record<string, boolean> = { ...defaults };
+    const seen = settings.inspect<Record<string, boolean>>(settingKey(section));
+    // Folder over workspace over user, the order VS Code resolves them in.
+    const configured = {
+      ...(seen?.globalValue ?? {}),
+      ...(seen?.workspaceValue ?? {}),
+      ...(seen?.workspaceFolderValue ?? {}),
+    };
+    const chosen: Record<string, boolean> = {};
     for (const column of Object.keys(defaults)) {
       if (typeof configured[column] === 'boolean') {
-        merged[column] = configured[column];
+        chosen[column] = configured[column];
       }
     }
-    columns[section] = merged;
-
-    const seen = settings.inspect<Record<string, boolean>>(key);
-    chosen[section] = Boolean(
-      seen &&
-        (seen.globalValue !== undefined ||
-          seen.workspaceValue !== undefined ||
-          seen.workspaceFolderValue !== undefined)
-    );
+    columns[section] = chosen;
   }
 
-  return { columns, chosen };
+  return { columns };
 }

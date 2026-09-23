@@ -133,6 +133,51 @@ function run(variant, sections, detailsIn) {
     }
   }
 
+  // A bar carries its own number, inside the bar rather than after it: two
+  // things in one column's width instead of two columns'.
+  if (nodesPanel) {
+    const headerText = Array.from(nodesPanel.querySelectorAll('thead th')).map((th) => th.textContent);
+    const cpuIndex = headerText.indexOf('CPU A/T');
+    const row = Array.from(nodesPanel.querySelectorAll('tbody tr')).find((tr) => tr.dataset.id === 'gpu01');
+    const cell = row.querySelectorAll('td')[cpuIndex];
+    const barEl = cell.querySelector('.bar');
+    check('a bar cell holds its bar', !!barEl);
+    check('the number is inside the bar, not beside it',
+      !!barEl && barEl.textContent.trim() === '16/64', barEl && barEl.textContent);
+    check('the cell has no text of its own outside the bar',
+      Array.from(cell.childNodes).every((n) => n === barEl || !n.textContent.trim()),
+      cell.innerHTML);
+    check('the fill is a sibling of the label, so it can be sized',
+      !!barEl.querySelector('.fill') && !!barEl.querySelector('.bar-label'));
+    // The label must not be inside the fill, or a 4% bar would clip the number.
+    check('the number is not inside the fill',
+      !barEl.querySelector('.fill .bar-label'));
+  }
+
+  // The cluster box draws how full the cluster is, which its table of totals
+  // cannot say: 400 CPUs busy is either most of the machine or a corner of it.
+  const summaryPanel = doc.querySelector("[data-section='summary']");
+  if (summaryPanel) {
+    const gauges = summaryPanel.querySelector('.summary-gauges');
+    check('the cluster box has utilisation bars', !!gauges && !gauges.classList.contains('hidden'));
+    const labels = Array.from(summaryPanel.querySelectorAll('.gauge-label')).map((n) => n.textContent);
+    check('one bar each for CPU, memory and GPUs', labels.join(',') === 'CPU,MEM,GPU', labels.join(','));
+    const texts = Array.from(summaryPanel.querySelectorAll('.gauge .bar-label')).map((n) => n.textContent);
+    // Fixture: 64+64+64+128+96 cores, 16+0+0+128+72 allocated.
+    const cores = snapshot.nodes.reduce((n, x) => n + x.cpus_total_n, 0);
+    const busy = snapshot.nodes.reduce((n, x) => n + x.cpus_alloc_n, 0);
+    check('the CPU bar counts the machines, not the job totals',
+      texts[0] === `${busy} / ${cores}`, texts[0]);
+    const gpus = snapshot.nodes.reduce((n, x) => n + x.gpu_total, 0);
+    check('the GPU bar counts installed cards', texts[2].endsWith(`/ ${gpus}`), texts[2]);
+    check('the memory bar is in human units', /G|T|M/.test(texts[1]), texts[1]);
+    const fills = Array.from(summaryPanel.querySelectorAll('.gauge .fill'));
+    check('the bars are filled to the fraction in use',
+      fills.every((f) => /%$/.test(f.style.width)) &&
+      parseFloat(fills[0].style.width) === Math.round((busy / cores) * 1000) / 10,
+      fills.map((f) => f.style.width).join(','));
+  }
+
   const disksPanel = doc.querySelector("[data-section='disks']");
   if (disksPanel) {
     const headerText = Array.from(disksPanel.querySelectorAll('thead th')).map((th) => th.textContent);
@@ -552,17 +597,17 @@ function runColumnSettings() {
   console.log('\ncolumn settings:');
   const sections = ['nodes', 'gpus'];
 
-  const open = (variant, columns, chosen) => {
+  const open = (variant, columns) => {
     const { window, send } = makeWindow(variant);
     send({ type: 'config', sections, ownerFilter: 'all', interval: 3, detailsIn: 'overlay',
-      columns, columnsChosen: chosen });
+      columns });
     send({ type: 'snapshot', snapshot });
     return window.document;
   };
   const headersOf = (doc, section) =>
     Array.from(doc.querySelectorAll(`[data-section='${section}'] thead th`)).map((th) => th.textContent);
 
-  const plain = open('dashboard', {}, {});
+  const plain = open('dashboard', {});
   check('with no setting the table keeps its usual columns',
     headersOf(plain, 'nodes').includes('MEM FREE') && headersOf(plain, 'nodes').includes('GPU FREE'),
     headersOf(plain, 'nodes').join(','));
@@ -570,30 +615,30 @@ function runColumnSettings() {
     !headersOf(plain, 'nodes').includes('REASON') && !headersOf(plain, 'nodes').includes('SCT'),
     headersOf(plain, 'nodes').join(','));
 
-  const hidden = open('dashboard', { nodes: { mem_free: false, load: false } }, { nodes: true });
+  const hidden = open('dashboard', { nodes: { mem_free: false, load: false } });
   check('unticking a column removes it',
     !headersOf(hidden, 'nodes').includes('MEM FREE') && !headersOf(hidden, 'nodes').includes('LOAD'),
     headersOf(hidden, 'nodes').join(','));
   check('the other columns stay', headersOf(hidden, 'nodes').includes('GPU U/T'),
     headersOf(hidden, 'nodes').join(','));
 
-  const shown = open('dashboard', { nodes: { reason: true, topology: true } }, { nodes: true });
+  const shown = open('dashboard', { nodes: { reason: true, topology: true } });
   check('ticking an off-by-default column adds it',
     headersOf(shown, 'nodes').includes('REASON') && headersOf(shown, 'nodes').includes('SCT'),
     headersOf(shown, 'nodes').join(','));
 
   // CPU is compactHide: the sidebar drops it by default, and stops doing so
   // once the user has chosen this table's columns.
-  const narrowDefault = open('sidebar', {}, {});
+  const narrowDefault = open('sidebar', {});
   check('the sidebar still drops wide columns by default',
     !headersOf(narrowDefault, 'nodes').includes('CPU'),
     headersOf(narrowDefault, 'nodes').join(','));
-  const narrowChosen = open('sidebar', { nodes: { cpu: true } }, { nodes: true });
+  const narrowChosen = open('sidebar', { nodes: { cpu: true } });
   check('a column chosen on the settings page survives the sidebar',
     headersOf(narrowChosen, 'nodes').includes('CPU'),
     headersOf(narrowChosen, 'nodes').join(','));
 
-  const gpuTrimmed = open('dashboard', { gpus: { mem_free: false, cpus_idle: false } }, { gpus: true });
+  const gpuTrimmed = open('dashboard', { gpus: { mem_free: false, cpus_idle: false } });
   check('the GPU table honours its own setting',
     !headersOf(gpuTrimmed, 'gpus').includes('MEM FREE') &&
     !headersOf(gpuTrimmed, 'gpus').includes('CPU IDLE') &&
@@ -610,7 +655,7 @@ function runColumnSettings() {
   const before = Array.from(window.document.querySelectorAll("[data-section='nodes'] thead th"))
     .map((th) => th.textContent);
   send({ type: 'config', sections, ownerFilter: 'all', interval: 3, detailsIn: 'overlay',
-    columns: { nodes: { gres: false } }, columnsChosen: { nodes: true } });
+    columns: { nodes: { gres: false } } });
   const after = Array.from(window.document.querySelectorAll("[data-section='nodes'] thead th"))
     .map((th) => th.textContent);
   check('a settings change rebuilds the table there and then',

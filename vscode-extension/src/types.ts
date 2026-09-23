@@ -295,10 +295,11 @@ export type HostMessage =
       servers: { id: string; name: string }[];
       /** Per section: one merged panel, or one panel per server. */
       merge: Record<string, boolean>;
-      /** Per section: which columns to show, as the settings page chose them. */
+      /**
+       * Per section, only the columns the user has set on the settings page.
+       * A column named here outranks the narrow view's own trimming.
+       */
       columns: Record<string, Record<string, boolean>>;
-      /** Sections the user configured, where the narrow view stops narrowing. */
-      columnsChosen: Record<string, boolean>;
     }
   | { type: 'pinned'; server?: string; pinned: string[] }
   | { type: 'cpuProbe'; server?: string; node: string; state: 'started' | 'done'; message?: string }

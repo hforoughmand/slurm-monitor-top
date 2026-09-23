@@ -72,7 +72,6 @@ function configMessage(variant: Variant, client: ClusterClient): HostMessage {
     servers: client.servers.map((spec) => ({ id: spec.id, name: client.nameOf(spec.id) })),
     merge: readMergeSettings(),
     columns: columns.columns,
-    columnsChosen: columns.chosen,
   };
 }
 

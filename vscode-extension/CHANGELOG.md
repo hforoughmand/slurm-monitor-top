@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- **Numbers ride on their bars.** A cell that draws a bar puts its figure
+  inside it rather than after it -- `48/96` on the bar, not beside it. Half the
+  columns of a machines table draw one, and a track plus the number again was
+  the width that pushed `MEM FREE` and the GPU columns off the side of the
+  panel. The whole table fits now.
+- **The cluster box says how full the cluster is.** Three bars under the
+  totals -- CPU, memory and GPUs in use against what the machines actually have.
+  Slurm reports how many cores are allocated but never how many exist, so the
+  capacity is summed from the machines; 400 CPUs busy is either most of the
+  cluster or a corner of it, and only a bar against the total says which. A box
+  covering several clusters adds their machines up; one with no GPUs says
+  `none` rather than drawing an empty bar.
+
+### Changed
+
+- **A column you tick is shown everywhere.** The column settings now carry only
+  what you actually set, and setting one is an instruction: tick `user` in
+  `slurmTop.jobColumns` and USER appears in the sidebar, where width would
+  otherwise have dropped it. Before, choosing any column at all stopped the
+  narrow view trimming *every* column, so asking for USER dragged NODELIST and
+  MEM in with it.
+
 ## 0.9.0
 
 ### Added

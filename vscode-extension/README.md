@@ -27,7 +27,7 @@ can be [more than one cluster](#watching-more-than-one-cluster).
 | Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, free GPUs, GPU types, and the CPU model. CPU, load and memory each get a bar. Filter by state (idle / mixed / allocated / drained or down), by partition, by GPUs (has some / some free / none), or by free text over the name, drain reason, GRES and CPU model. |
 | GPUs | one row per machine per model: GPUs in use out of installed, how many are spare, and that machine's free memory, spare cores and state. Filter by cluster, by model, or by availability — `free and usable` leaves out machines that have a card idle but are drained. Open a row for the jobs holding that model there. |
 | Disks | `df -h` usage with a bar, mount point, size, used, free, filesystem type. Size columns sort by real bytes, so `2T` sorts above `176G`. |
-| Summary | running and pending jobs, GPUs, CPUs and memory, split all / me / others. |
+| Summary | running and pending jobs, GPUs, CPUs and memory, split all / me / others — and three bars for how full the cluster is: CPU, memory and GPUs in use against what its machines actually have. |
 
 Double-click (or select and press <kbd>Enter</kbd>) a job or machine for its
 full `scontrol` details in a popup; press <kbd>c</kbd> to copy the selected row.
@@ -53,9 +53,15 @@ and load of a GPU machine. Tick one and it appears; untick a crowded table's
 widest columns and the rest stop scrolling off the side.
 
 The sidebar drops the widest columns to fit its ~300px, which is why the CPU
-model and GRES are missing there. Once you have chosen a table's columns
-yourself, it stops doing that and shows exactly what you asked for — so a
-column you ticked on purpose appears in both views.
+model and GRES are missing there — and why USER is missing from the jobs table,
+since the owner filter usually answers that. A column you tick here is an
+instruction rather than a preference, so it appears in both views:
+
+```jsonc
+"slurmTop.jobColumns": { "user": true }
+```
+
+is all it takes to get USER back in the sidebar, and nothing else moves.
 
 ## Watching more than one cluster
 
