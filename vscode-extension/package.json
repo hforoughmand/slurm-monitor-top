@@ -2,7 +2,7 @@
   "name": "slurm-monitor-top",
   "displayName": "Slurm Monitor (slurm-top)",
   "description": "htop-style live view of Slurm jobs, nodes, GPUs and disks, in the sidebar or a full editor tab.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "license": "MIT",
   "publisher": "hforoughmand",
   "icon": "media/icon.png",
@@ -251,18 +251,265 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "When reading a machine's CPU model, fall back to a one-second Slurm job if ssh to that node is refused. Slurm reports neither the model nor the clock, so one of the two routes is the only way to get them. Turn this off to try ssh only, on clusters where submitting a probe job is unwelcome. Probes only ever run when you ask for one."
+        },
+        "slurmTop.jobColumns": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {
+            "job_id": true,
+            "user": true,
+            "state": true,
+            "partition": true,
+            "name": true,
+            "nodes": true,
+            "cpus": true,
+            "gpus": true,
+            "mem": true,
+            "time": true,
+            "node_list": true
+          },
+          "markdownDescription": "Which columns the jobs table shows. Untick one to hide it.\n\nThe sidebar drops the widest columns to fit; once you have chosen columns here yourself, it shows exactly what you asked for instead.",
+          "properties": {
+            "job_id": {
+              "type": "boolean",
+              "description": "The job id."
+            },
+            "user": {
+              "type": "boolean",
+              "description": "Who submitted it."
+            },
+            "state": {
+              "type": "boolean",
+              "description": "Running, pending, completing."
+            },
+            "partition": {
+              "type": "boolean",
+              "description": "The partition it is queued on."
+            },
+            "name": {
+              "type": "boolean",
+              "description": "The job name."
+            },
+            "nodes": {
+              "type": "boolean",
+              "description": "How many machines it asked for."
+            },
+            "cpus": {
+              "type": "boolean",
+              "description": "How many cores it asked for."
+            },
+            "gpus": {
+              "type": "boolean",
+              "description": "How many GPUs it holds."
+            },
+            "mem": {
+              "type": "boolean",
+              "description": "Memory requested."
+            },
+            "time": {
+              "type": "boolean",
+              "description": "Elapsed run time."
+            },
+            "node_list": {
+              "type": "boolean",
+              "description": "The machines it is running on."
+            }
+          }
+        },
+        "slurmTop.nodeColumns": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {
+            "name": true,
+            "state": true,
+            "partition": true,
+            "cpus": true,
+            "cpus_idle": true,
+            "cpus_total": false,
+            "load": true,
+            "mem_total": true,
+            "mem_free": true,
+            "mem_used": false,
+            "gpus": true,
+            "gpu_free": true,
+            "gres": true,
+            "reason": false,
+            "topology": false,
+            "cpu": true
+          },
+          "markdownDescription": "Which columns the machines table shows. Untick one to hide it.\n\nThe sidebar drops the widest columns to fit; once you have chosen columns here yourself, it shows exactly what you asked for instead.",
+          "properties": {
+            "name": {
+              "type": "boolean",
+              "description": "The machine name."
+            },
+            "state": {
+              "type": "boolean",
+              "description": "Idle, mixed, allocated, drained, with the drain reason inline."
+            },
+            "partition": {
+              "type": "boolean",
+              "description": "The partitions it belongs to."
+            },
+            "cpus": {
+              "type": "boolean",
+              "description": "Allocated out of total cores, with a bar."
+            },
+            "cpus_idle": {
+              "type": "boolean",
+              "description": "Cores going spare."
+            },
+            "cpus_total": {
+              "type": "boolean",
+              "description": "Total cores, as a column of its own."
+            },
+            "load": {
+              "type": "boolean",
+              "description": "1-minute load against the core count, with a bar."
+            },
+            "mem_total": {
+              "type": "boolean",
+              "description": "Installed memory."
+            },
+            "mem_free": {
+              "type": "boolean",
+              "description": "Free memory, with a bar."
+            },
+            "mem_used": {
+              "type": "boolean",
+              "description": "Memory currently reserved."
+            },
+            "gpus": {
+              "type": "boolean",
+              "description": "GPUs in use out of installed."
+            },
+            "gpu_free": {
+              "type": "boolean",
+              "description": "GPUs going spare."
+            },
+            "gres": {
+              "type": "boolean",
+              "description": "The GPU models installed."
+            },
+            "reason": {
+              "type": "boolean",
+              "description": "Why a machine is drained or down, as a sortable column."
+            },
+            "topology": {
+              "type": "boolean",
+              "description": "Sockets x cores per socket x threads per core."
+            },
+            "cpu": {
+              "type": "boolean",
+              "description": "The CPU model, once it has been read from the machine."
+            }
+          }
+        },
+        "slurmTop.gpuColumns": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {
+            "node": true,
+            "type": true,
+            "used": true,
+            "free": true,
+            "mem_free": true,
+            "cpus_idle": true,
+            "state": true,
+            "partition": false,
+            "load": false
+          },
+          "markdownDescription": "Which columns the GPU table shows. Untick one to hide it.\n\nThe sidebar drops the widest columns to fit; once you have chosen columns here yourself, it shows exactly what you asked for instead.",
+          "properties": {
+            "node": {
+              "type": "boolean",
+              "description": "The machine the GPUs are in."
+            },
+            "type": {
+              "type": "boolean",
+              "description": "The GPU model."
+            },
+            "used": {
+              "type": "boolean",
+              "description": "In use out of installed on that machine, with a bar."
+            },
+            "free": {
+              "type": "boolean",
+              "description": "How many of them are spare."
+            },
+            "mem_free": {
+              "type": "boolean",
+              "description": "The machine's free memory, with a bar."
+            },
+            "cpus_idle": {
+              "type": "boolean",
+              "description": "The machine's spare cores."
+            },
+            "state": {
+              "type": "boolean",
+              "description": "What the machine is doing."
+            },
+            "partition": {
+              "type": "boolean",
+              "description": "The partitions the machine belongs to."
+            },
+            "load": {
+              "type": "boolean",
+              "description": "The machine's load, with a bar."
+            }
+          }
+        },
+        "slurmTop.diskColumns": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {
+            "usage": true,
+            "mount": true,
+            "size": true,
+            "used": true,
+            "avail": true,
+            "type": true
+          },
+          "markdownDescription": "Which columns the disks table shows. Untick one to hide it.\n\nThe sidebar drops the widest columns to fit; once you have chosen columns here yourself, it shows exactly what you asked for instead.",
+          "properties": {
+            "usage": {
+              "type": "boolean",
+              "description": "Percentage used, with a bar."
+            },
+            "mount": {
+              "type": "boolean",
+              "description": "The mount point."
+            },
+            "size": {
+              "type": "boolean",
+              "description": "Total size."
+            },
+            "used": {
+              "type": "boolean",
+              "description": "Space used."
+            },
+            "avail": {
+              "type": "boolean",
+              "description": "Space free."
+            },
+            "type": {
+              "type": "boolean",
+              "description": "The filesystem type."
+            }
+          }
         }
       }
     }
   },
   "scripts": {
     "sync-python": "node scripts/sync-python.js",
-    "compile": "npm run sync-python && tsc -p ./",
+    "compile": "npm run sync-python && npm run sync-columns && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "npm run compile && npx @vscode/vsce package --baseContentUrl https://github.com/hforoughmand/slurm-monitor-top/raw/HEAD/vscode-extension",
     "publish-vsce": "npm run compile && npx @vscode/vsce publish --baseContentUrl https://github.com/hforoughmand/slurm-monitor-top/raw/HEAD/vscode-extension",
-    "test": "npm run compile && node test/webview.smoke.js && node test/multiserver.smoke.js && node test/quickpick.smoke.js && node test/detail.smoke.js && node test/host.smoke.js"
+    "test": "npm run compile && node test/columns.smoke.js && node test/webview.smoke.js && node test/multiserver.smoke.js && node test/quickpick.smoke.js && node test/detail.smoke.js && node test/host.smoke.js",
+    "sync-columns": "node scripts/sync-columns.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

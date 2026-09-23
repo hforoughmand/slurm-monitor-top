@@ -63,6 +63,15 @@
     nodePartitionFilter: saved.nodePartitionFilter || 'all',
     nodeGpuFilter: saved.nodeGpuFilter || 'all',
     nodeSearch: saved.nodeSearch || '',
+    /** The same again for the GPU table, whose rows are machines. */
+    gpuServerFilter: saved.gpuServerFilter || 'all',
+    gpuTypeFilter: saved.gpuTypeFilter || 'all',
+    gpuFreeFilter: saved.gpuFreeFilter || 'all',
+    gpuSearch: saved.gpuSearch || '',
+    /** Which columns each table shows, as the settings page chose them. */
+    columns: /** @type {Record<string, Record<string, boolean>>} */ ({}),
+    /** Sections whose columns the user picked, so compact may stop narrowing. */
+    columnsChosen: /** @type {Record<string, boolean>} */ ({}),
     sort: Object.assign(
       { jobs: { key: 'default', desc: false }, nodes: { key: 'name', desc: false }, gpus: { key: 'type', desc: false }, disks: { key: 'usage', desc: true } },
       saved.sort || {}
@@ -95,6 +104,10 @@
       nodePartitionFilter: state.nodePartitionFilter,
       nodeGpuFilter: state.nodeGpuFilter,
       nodeSearch: state.nodeSearch,
+      gpuServerFilter: state.gpuServerFilter,
+      gpuTypeFilter: state.gpuTypeFilter,
+      gpuFreeFilter: state.gpuFreeFilter,
+      gpuSearch: state.gpuSearch,
       sort: state.sort,
       selected: state.selected,
       collapsed: state.collapsed,
@@ -288,7 +301,10 @@
       sort: (n) => n.cpus_alloc_n,
       bar: (n) => (n.cpus_total_n ? n.cpus_alloc_n / n.cpus_total_n : 0),
     },
-    { key: 'cpus_idle', label: 'IDLE', numeric: true, value: (n) => n.cpus_idle_n, compactHide: true },
+    // Free cores are half the question "can I land a job here", so this one
+    // survives into the narrow view alongside free memory.
+    { key: 'cpus_idle', label: 'IDLE', numeric: true, value: (n) => n.cpus_idle_n },
+    { key: 'cpus_total', label: 'CPUS', numeric: true, value: (n) => n.cpus_total_n, off: true },
     {
       key: 'load',
       label: 'LOAD',
@@ -308,6 +324,14 @@
       bar: (n) => (n.mem_total_mb ? 1 - n.mem_free_mb / n.mem_total_mb : 0),
     },
     {
+      key: 'mem_used',
+      label: 'MEM USED',
+      numeric: true,
+      value: (n) => n.mem_reserved_human,
+      sort: (n) => n.mem_reserved_mb,
+      off: true,
+    },
+    {
       key: 'gpus',
       label: 'GPU U/T',
       numeric: true,
@@ -315,7 +339,32 @@
       sort: (n) => n.gpu_free,
       cls: (n) => (n.gpu_total && n.gpu_free > 0 ? 'state-running' : 'state-other'),
     },
+    {
+      key: 'gpu_free',
+      label: 'GPU FREE',
+      numeric: true,
+      value: (n) => (n.gpu_total ? n.gpu_free : '-'),
+      sort: (n) => n.gpu_free,
+      cls: (n) => (n.gpu_total && n.gpu_free > 0 ? 'state-running' : 'state-other'),
+    },
     { key: 'gres', label: 'GRES', value: (n) => (n.gpu_types || []).join(', ') || n.gres, compactHide: true },
+    {
+      key: 'reason',
+      label: 'REASON',
+      // The state cell already carries this inline; a column of its own is for
+      // sorting a cluster by why its machines are out.
+      value: (n) => n.reason || '-',
+      cls: (n) => (n.reason ? 'state-failed' : 'dim'),
+      off: true,
+    },
+    {
+      key: 'topology',
+      label: 'SCT',
+      title: () => 'Sockets x cores per socket x threads per core',
+      value: (n) =>
+        n.sockets ? `${n.sockets}x${n.cores_per_socket}x${n.threads_per_core}` : '-',
+      off: true,
+    },
     {
       key: 'cpu',
       label: 'CPU',
@@ -350,18 +399,59 @@
     { key: 'type', label: 'TYPE', value: (d) => d.fs_type, compactHide: true },
   ];
 
+  /**
+   * One row per machine per GPU type, not one per type.
+   *
+   * "Three a100 free somewhere on the cluster" is not an answer you can submit
+   * against: the question is which machine has one, and whether it has the
+   * memory and cores to go with it. So the row is a node, and the totals move
+   * into the panel's counter.
+   */
   const GPU_COLUMNS = [
+    { key: 'node', label: 'NODE', value: (g) => g.node },
     { key: 'type', label: 'GPU TYPE', value: (g) => g.type },
-    { key: 'total', label: 'TOTAL', numeric: true, value: (g) => g.total },
     {
-      key: 'active',
-      label: 'ACTIVE',
+      key: 'used',
+      label: 'GPU U/T',
       numeric: true,
-      value: (g) => g.active,
-      bar: (g) => (g.total ? g.active / g.total : 0),
+      value: (g) => `${g.used}/${g.total}`,
+      sort: (g) => g.used,
+      bar: (g) => (g.total ? g.used / g.total : 0),
     },
-    { key: 'reserved', label: 'RESRV', numeric: true, value: (g) => g.reserved, compactHide: true },
-    { key: 'free', label: 'FREE', numeric: true, value: (g) => g.free_est, cls: (g) => (g.free_est > 0 ? 'state-running' : 'state-other') },
+    {
+      key: 'free',
+      label: 'FREE',
+      numeric: true,
+      value: (g) => g.free,
+      cls: (g) => (g.free > 0 ? 'state-running' : 'state-other'),
+    },
+    {
+      key: 'mem_free',
+      label: 'MEM FREE',
+      numeric: true,
+      value: (g) => g.mem_free_human,
+      sort: (g) => g.mem_free_mb,
+      bar: (g) => (g.mem_total_mb ? 1 - g.mem_free_mb / g.mem_total_mb : 0),
+    },
+    { key: 'cpus_idle', label: 'CPU IDLE', numeric: true, value: (g) => g.cpus_idle_n },
+    {
+      key: 'state',
+      label: 'STATE',
+      value: (g) => (g.reason ? `${g.state} (${g.reason})` : g.state),
+      sort: (g) => g.state,
+      cls: (g) => (/drain|down|fail|err/i.test(String(g.state)) ? 'state-failed' : /idle/i.test(String(g.state)) ? 'state-running' : 'state-other'),
+      compactHide: true,
+    },
+    { key: 'partition', label: 'PART', value: (g) => g.partition, off: true },
+    {
+      key: 'load',
+      label: 'LOAD',
+      numeric: true,
+      value: (g) => (g.cpu_load_n || 0).toFixed(2),
+      sort: (g) => g.cpu_load_ratio,
+      bar: (g) => g.cpu_load_ratio,
+      off: true,
+    },
   ];
 
   /**
@@ -376,10 +466,7 @@
       key: 'server',
       label: compact ? 'SRV' : 'SERVER',
       cls: () => 'server-cell',
-      value: (row) =>
-        section === 'gpus' && (row.servers || []).length
-          ? row.servers.join(', ')
-          : row.server_name || serverName(serverOf(row)),
+      value: (row) => row.server_name || serverName(serverOf(row)),
       sort: (row) => row.server_name || serverOf(row),
     };
   }
@@ -387,7 +474,7 @@
   const SECTION_SPEC = {
     jobs: { title: 'Jobs', columns: JOB_COLUMNS, id: (j) => j.job_id },
     nodes: { title: 'Nodes', columns: NODE_COLUMNS, id: (n) => n.name },
-    gpus: { title: 'GPUs', columns: GPU_COLUMNS, id: (g) => g.type },
+    gpus: { title: 'GPUs', columns: GPU_COLUMNS, id: (g) => `${g.node}/${g.type}` },
     disks: { title: 'Disks', columns: DISK_COLUMNS, id: (d) => d.mount },
   };
 
@@ -396,9 +483,26 @@
     return `${serverOf(row)}/${SECTION_SPEC[section].id(row)}`;
   }
 
+  /**
+   * Whether a column is shown: the settings page decides, then the width does.
+   *
+   * `off` marks a column that exists but is not shown until asked for, and
+   * `compactHide` one the sidebar drops for want of room. Once the user has
+   * picked this table's columns themselves, the sidebar stops second-guessing
+   * them -- a column ticked on purpose is meant to appear everywhere.
+   */
+  function columnShown(section, column) {
+    const chosen = state.columns[section] || {};
+    if (typeof chosen[column.key] === 'boolean') {
+      return chosen[column.key] && !(compact && column.compactHide && !state.columnsChosen[section]);
+    }
+    if (column.off) return false;
+    return !(compact && column.compactHide);
+  }
+
   function columnsFor(section, merged) {
     const all = SECTION_SPEC[section].columns;
-    const visible = compact ? all.filter((c) => !c.compactHide) : all.slice();
+    const visible = all.filter((c) => c.key === 'pin' || columnShown(section, c));
     if (!merged || !manyServers()) return visible;
     // After the pin star, which is a control rather than a field, and before
     // everything that identifies the row within its own cluster.
@@ -507,6 +611,50 @@
       .includes(needle);
   }
 
+  /** Every GPU model on a machine somewhere, for the type menu. */
+  function gpuTypesOf(nodes) {
+    const seen = new Set();
+    for (const node of nodes || []) {
+      for (const type of Object.keys(node.gpu_inventory || {})) seen.add(type);
+    }
+    return Array.from(seen).sort();
+  }
+
+  function matchesGpuServer(row) {
+    if (state.gpuServerFilter === 'all') return true;
+    return serverOf(row) === state.gpuServerFilter;
+  }
+
+  function matchesGpuType(row) {
+    if (state.gpuTypeFilter === 'all') return true;
+    return row.type === state.gpuTypeFilter;
+  }
+
+  /**
+   * Free GPUs, and free GPUs you could actually use.
+   *
+   * A drained machine can have every GPU idle and still take no work, so
+   * "available" means spare *and* the machine is willing.
+   */
+  function matchesGpuFree(row) {
+    if (state.gpuFreeFilter === 'all') return true;
+    if (state.gpuFreeFilter === 'free') return row.free > 0;
+    if (state.gpuFreeFilter === 'available') {
+      return row.free > 0 && !/drain|down|fail|err|maint|unk|\*/.test(String(row.state).toLowerCase());
+    }
+    if (state.gpuFreeFilter === 'busy') return row.free === 0;
+    return true;
+  }
+
+  function matchesGpuSearch(row) {
+    const needle = state.gpuSearch.trim().toLowerCase();
+    if (!needle) return true;
+    return [row.node, row.type, row.state, row.reason, row.partition, row.server_name]
+      .join(' ')
+      .toLowerCase()
+      .includes(needle);
+  }
+
   /**
    * Move pinned jobs to the front, keeping the order within both groups.
    *
@@ -533,33 +681,41 @@
   }
 
   /**
-   * GPU totals per model, summed over the servers a panel covers.
+   * One row per machine per GPU model, carrying that machine's spare capacity.
    *
-   * A merged row is "how many of these exist between all the clusters", which
-   * is the question the panel answers, so it also carries the names of the
-   * clusters that contributed to it.
+   * Everything comes from the node list rather than the collector's per-type
+   * totals, because the totals cannot say *where* a free GPU is, and where is
+   * the only part you can act on.
    */
-  function gpuRows(servers) {
-    const byType = new Map();
-    for (const server of servers) {
-      const stats = (server.gpu || {}).per_type_stats || {};
-      for (const type of Object.keys(stats)) {
-        const cell = stats[type];
-        const into = byType.get(type) || {
-          type, total: 0, active: 0, reserved: 0, free_est: 0,
-          server: servers.length === 1 ? server.id : '',
-          server_name: server.name,
-          servers: [],
-        };
-        into.total += Number(cell.total) || 0;
-        into.active += Number(cell.active) || 0;
-        into.reserved += Number(cell.reserved) || 0;
-        into.free_est += Number(cell.free_est) || 0;
-        if (into.servers.indexOf(server.name) < 0) into.servers.push(server.name);
-        byType.set(type, into);
+  function gpuRows(nodes) {
+    const rows = [];
+    for (const node of nodes) {
+      const inventory = node.gpu_inventory || {};
+      for (const type of Object.keys(inventory)) {
+        const total = Number(inventory[type]) || 0;
+        if (!total) continue;
+        const used = Number((node.gpu_allocated || {})[type]) || 0;
+        rows.push({
+          server: serverOf(node),
+          server_name: node.server_name,
+          node: node.name,
+          type,
+          total,
+          used,
+          free: Math.max(0, total - used),
+          state: node.state,
+          reason: node.reason,
+          partition: node.partition,
+          cpus_idle_n: node.cpus_idle_n,
+          cpu_load_n: node.cpu_load_n,
+          cpu_load_ratio: node.cpu_load_ratio,
+          mem_free_human: node.mem_free_human,
+          mem_free_mb: node.mem_free_mb,
+          mem_total_mb: node.mem_total_mb,
+        });
       }
     }
-    return Array.from(byType.values());
+    return rows;
   }
 
   /** The rows one panel shows: its section, narrowed to its server if it has one. */
@@ -581,11 +737,9 @@
     }
     if (section === 'disks') return (state.snapshot.disks || []).filter(onlyHere);
     if (section === 'gpus') {
-      const servers = serverList().filter((s) => !panel.server || s.id === panel.server);
-      if (servers.length) return gpuRows(servers);
-      // A collector older than multi-server support sends no server list.
-      const stats = (state.snapshot.gpu || {}).per_type_stats || {};
-      return Object.keys(stats).map((type) => Object.assign({ type, server: '', servers: [] }, stats[type]));
+      return gpuRows((state.snapshot.nodes || []).filter(onlyHere)).filter(
+        (g) => matchesGpuServer(g) && matchesGpuType(g) && matchesGpuFree(g) && matchesGpuSearch(g)
+      );
     }
     return [];
   }
@@ -625,7 +779,16 @@
    * changed at all.
    */
   function planSignature(plan) {
-    return `${manyServers() ? 'many' : 'one'}:${plan.map((entry) => entry.key).join('|')}`;
+    // The chosen columns are part of the layout: unticking one in the settings
+    // has to rebuild the tables, not just refill the rows they already have.
+    const columns = Object.keys(state.columns)
+      .sort()
+      .map((section) => {
+        const chosen = state.columns[section] || {};
+        return `${section}=${Object.keys(chosen).filter((k) => chosen[k]).sort().join(',')}`;
+      })
+      .join(';');
+    return `${manyServers() ? 'many' : 'one'}:${plan.map((entry) => entry.key).join('|')}:${columns}`;
   }
 
   function bar() {
@@ -703,6 +866,7 @@
     const built =
       entry.section === 'jobs' ? { controls: jobControls(entry) }
       : entry.section === 'nodes' ? nodeControls(entry)
+      : entry.section === 'gpus' ? gpuControls(entry)
       : { controls: [] };
     const { panel, count } = makePanel(entry, panelTitle(entry), built.controls, body);
     panels[entry.key] = {
@@ -877,6 +1041,82 @@
     return { controls, refresh };
   }
 
+  /**
+   * The machines panel's filter strip, for the GPU table.
+   *
+   * Its rows are machines too, so it asks the same shape of question: which
+   * cluster, which model, whether anything is spare.
+   */
+  function gpuControls(entry) {
+    const controls = [];
+    const add = (title, key, options, onPick) => {
+      const node = el('select', {
+        title,
+        onchange: (e) => {
+          state[key] = e.target.value;
+          persist();
+          updateSection('gpus');
+        },
+      });
+      for (const [value, label] of options) {
+        node.appendChild(el('option', { value, text: label }));
+      }
+      node.value = state[key];
+      controls.push(node);
+      if (onPick) onPick(node);
+    };
+
+    if (!entry.server && manyServers()) {
+      const options = [['all', 'all servers']].concat(
+        serverList().map((s) => [s.id, s.name || s.id])
+      );
+      if (!serverList().some((s) => s.id === state.gpuServerFilter)) state.gpuServerFilter = 'all';
+      add('Which cluster to show GPUs from', 'gpuServerFilter', options);
+    }
+
+    let typeSelect = null;
+    add('Which GPU model', 'gpuTypeFilter', [['all', 'all models']], (node) => { typeSelect = node; });
+
+    add('Whether the machine has a GPU going spare', 'gpuFreeFilter', [
+      ['all', 'any'],
+      ['available', 'free and usable'],
+      ['free', 'free'],
+      ['busy', 'none free'],
+    ]);
+
+    const search = el('input', {
+      type: 'search',
+      placeholder: 'search',
+      title: 'Filter by machine, model, state or partition',
+      oninput: (e) => {
+        state.gpuSearch = e.target.value;
+        persist();
+        updateSection('gpus');
+      },
+    });
+    /** @type {HTMLInputElement} */ (search).value = state.gpuSearch;
+    controls.push(search);
+
+    const refresh = () => {
+      if (!typeSelect) return;
+      const nodes = (state.snapshot && state.snapshot.nodes) || [];
+      const wanted = gpuTypesOf(
+        entry.server ? nodes.filter((n) => serverOf(n) === entry.server) : nodes
+      );
+      const have = Array.from(typeSelect.options).slice(1).map((o) => o.value);
+      if (have.length === wanted.length && have.every((v, i) => v === wanted[i])) return;
+      const chosen = state.gpuTypeFilter;
+      while (typeSelect.options.length > 1) typeSelect.remove(1);
+      for (const type of wanted) {
+        typeSelect.appendChild(el('option', { value: type, text: type }));
+      }
+      state.gpuTypeFilter = wanted.indexOf(chosen) >= 0 ? chosen : 'all';
+      typeSelect.value = state.gpuTypeFilter;
+    };
+
+    return { controls, refresh };
+  }
+
   function makeSummarySection(entry) {
     const grid = el('div', { class: 'summary-grid' });
     grid.appendChild(el('span', { class: 'head' }));
@@ -1016,7 +1256,7 @@
       const all = (state.snapshot.nodes || []).filter((n) => !panel.server || serverOf(n) === panel.server);
       panel.count.textContent = rows.length === all.length ? String(all.length) : `${rows.length}/${all.length}`;
     } else if (section === 'gpus') {
-      const free = rows.reduce((sum, row) => sum + (Number(row.free_est) || 0), 0);
+      const free = rows.reduce((sum, row) => sum + (Number(row.free) || 0), 0);
       const total = rows.reduce((sum, row) => sum + (Number(row.total) || 0), 0);
       panel.count.textContent = `${free} free / ${total}`;
     } else {
@@ -1267,11 +1507,28 @@
   function showGpuJobs(row) {
     const type = String(row.type);
     const scope = String(row.server || '');
+    const node = String(row.node || '');
+    // The row is one machine's GPUs, so the jobs worth listing are the ones on
+    // that machine -- `node_list` is a range like `gpu[01-04]`, which is why
+    // this asks whether the name occurs rather than comparing it.
     const jobs = (state.snapshot.jobs || []).filter(
-      (j) => Object.keys(j.gpu_types || {}).indexOf(type) >= 0 && (!scope || serverOf(j) === scope)
+      (j) =>
+        Object.keys(j.gpu_types || {}).indexOf(type) >= 0 &&
+        (!scope || serverOf(j) === scope) &&
+        (!node || String(j.node_list || '').indexOf(node.replace(/\d+$/, '')) >= 0)
     );
     const showServer = !scope && manyServers();
-    const children = [el('h3', { text: `Jobs holding ${type}` })];
+    const children = [
+      el('h3', { text: node ? `Jobs holding ${type} on ${node}` : `Jobs holding ${type}` }),
+      el('p', { class: 'hint' }, [
+        el('button', {
+          class: 'linkish',
+          text: `Open ${node}`,
+          title: 'Show everything about this machine',
+          onclick: () => requestDetail('node', node, scope),
+        }),
+      ]),
+    ];
     if (!jobs.length) {
       children.push(el('p', { class: 'hint', text: 'No job currently holds this GPU type.' }));
     } else {
@@ -1292,7 +1549,7 @@
         })
       );
     }
-    showOverlay(titleWithServer(`GPU ${type}`, scope), children);
+    showOverlay(titleWithServer(node ? `${node} · ${type}` : `GPU ${type}`, scope), children);
   }
 
   /**
@@ -1660,6 +1917,8 @@
         state.detailsIn = message.detailsIn || 'window';
         if (Array.isArray(message.servers)) state.servers = message.servers;
         if (message.merge) state.merge = Object.assign({}, state.merge, message.merge);
+        if (message.columns) state.columns = message.columns;
+        if (message.columnsChosen) state.columnsChosen = message.columnsChosen;
         if (isDetailView) break;
         if (Array.isArray(message.sections)) state.sections = message.sections;
         relayoutIfNeeded();

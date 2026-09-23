@@ -162,21 +162,24 @@ function runMerged() {
   const uids = Array.from(jobsPanel.querySelectorAll('tbody tr')).map((tr) => tr.dataset.uid);
   check('but each row has an identity of its own', new Set(uids).size === uids.length);
 
-  // GPUs are summed per model across the clusters that have them.
+  // The GPU table is one row per machine per model, so the same machine name
+  // on two clusters has to stay two rows -- the thing a merged view gets wrong.
   const gpuPanel = doc.querySelector("[data-section='gpus']");
   const gpuRows = Array.from(gpuPanel.querySelectorAll('tbody tr'));
-  check('GPU models are merged, not listed twice',
-    gpuRows.length === Object.keys(base.gpu.per_type_stats).length, String(gpuRows.length));
-  const totalIndex = headersOf(gpuPanel).indexOf('TOTAL');
-  const a100 = gpuRows.find((tr) => tr.dataset.id === 'a100');
-  check('a merged GPU row adds the clusters up',
-    Number(a100.querySelectorAll('td')[totalIndex].textContent) ===
-      base.gpu.per_type_stats.a100.total * 2,
-    a100.querySelectorAll('td')[totalIndex].textContent);
+  const perServer = base.nodes.reduce(
+    (n, node) => n + Object.keys(node.gpu_inventory || {}).length, 0);
+  check('every cluster contributes its own GPU machines',
+    gpuRows.length === perServer * 2, `${gpuRows.length} vs ${perServer * 2}`);
+  const gpuIds = gpuRows.map((tr) => tr.dataset.id);
+  check('the same machine on both clusters is listed twice',
+    gpuIds.filter((id) => id === 'gpu01/a100').length === 2, gpuIds.join(','));
+  const gpuUids = gpuRows.map((tr) => tr.dataset.uid);
+  check('but each GPU row has an identity of its own',
+    new Set(gpuUids).size === gpuUids.length);
   const serverIndex = headersOf(gpuPanel).indexOf('SERVER');
-  check('and says which clusters it came from',
-    a100.querySelectorAll('td')[serverIndex].textContent === 'alpha, beta',
-    a100.querySelectorAll('td')[serverIndex].textContent);
+  check('and each says which cluster it is on',
+    new Set(gpuRows.map((tr) => tr.querySelectorAll('td')[serverIndex].textContent)).size === 2,
+    gpuRows.map((tr) => tr.querySelectorAll('td')[serverIndex].textContent).join(','));
 
   // The server filter is the merged jobs panel's own control.
   const selects = jobsPanel.querySelectorAll('.panel-head select');

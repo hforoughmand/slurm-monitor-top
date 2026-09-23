@@ -298,11 +298,32 @@ async function checkPushedCollector() {
     return;
   }
 
-  const { json, why } = await new Promise((resolve) => {
-    execFile(argv[0], argv.slice(1), { timeout: 120000, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) =>
-      resolve({ json: err ? null : out, why: err ? `${err.message} ${errOut}`.slice(0, 200) : '' })
-    );
-  });
+  // A real ssh round trip, so a dropped connection is the network's fault and
+  // not the collector's: sshd here closes a session now and again. Retried
+  // rather than ignored, so a payload that genuinely cannot run still fails.
+  const attempt = () =>
+    new Promise((resolve) => {
+      execFile(argv[0], argv.slice(1), { timeout: 120000, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) =>
+        // The command is 26KB of payload, so what the far side *said* has to be
+        // kept apart from it -- appending the two and truncating loses it.
+        resolve({ json: err ? null : out, stderr: String(errOut || ''),
+          why: err ? `${String(errOut || '').slice(0, 160)} | ${err.message.slice(0, 120)}` : '' })
+      );
+    });
+  const dropped = (text) => /closed by remote host|connection reset|broken pipe/i.test(text);
+  let { json, why, stderr } = await attempt();
+  for (let left = 2; !json && left > 0 && dropped(stderr); left -= 1) {
+    console.log('  note ssh dropped the connection, retrying');
+    ({ json, why, stderr } = await attempt());
+  }
+  if (!json && dropped(stderr)) {
+    // Every attempt was cut off by sshd rather than answered. On a busy login
+    // node that says nothing about the collector, and calling it a failure
+    // would train people to ignore this suite -- so it is a skip, and only for
+    // this one symptom. A python error still fails the check below.
+    console.log('  skip ssh kept dropping the session; the far side never ran');
+    return;
+  }
   check('the far side answered with a snapshot', !!json, why);
   if (json) {
     const snapshot = JSON.parse(json);

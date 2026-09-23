@@ -24,14 +24,38 @@ can be [more than one cluster](#watching-more-than-one-cluster).
 | | |
 |---|---|
 | Jobs | id, user, state, partition, name, nodes, CPUs, GPUs, memory, elapsed time, node list. Filter by owner (all / me / others), by state, or by free text. Click a column to sort, or the star to pin. |
-| Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, GPU types, and the CPU model. CPU, load and memory each get a bar. Filter by state (idle / mixed / allocated / drained or down), by partition, by GPUs (has some / some free / none), or by free text over the name, drain reason, GRES and CPU model. |
-| GPUs | per type: total, active, reserved, free. Open one to list the jobs holding it. |
+| Machines | state (with the drain reason inline), partition, allocated/total CPUs and idle CPUs, 1-minute load against the core count, total and free memory, allocated/installed GPUs, free GPUs, GPU types, and the CPU model. CPU, load and memory each get a bar. Filter by state (idle / mixed / allocated / drained or down), by partition, by GPUs (has some / some free / none), or by free text over the name, drain reason, GRES and CPU model. |
+| GPUs | one row per machine per model: GPUs in use out of installed, how many are spare, and that machine's free memory, spare cores and state. Filter by cluster, by model, or by availability — `free and usable` leaves out machines that have a card idle but are drained. Open a row for the jobs holding that model there. |
 | Disks | `df -h` usage with a bar, mount point, size, used, free, filesystem type. Size columns sort by real bytes, so `2T` sorts above `176G`. |
 | Summary | running and pending jobs, GPUs, CPUs and memory, split all / me / others. |
 
 Double-click (or select and press <kbd>Enter</kbd>) a job or machine for its
 full `scontrol` details in a popup; press <kbd>c</kbd> to copy the selected row.
 <kbd>↑</kbd> and <kbd>↓</kbd> move the selection once a table has focus.
+
+### Choosing the columns
+
+Every field the collector reports has a column, and each table has a setting
+saying which of them to show — a grid of checkboxes in the settings editor,
+under **Slurm Monitor**:
+
+| | |
+|---|---|
+| `slurmTop.jobColumns` | the jobs table |
+| `slurmTop.nodeColumns` | the machines table |
+| `slurmTop.gpuColumns` | the GPU table |
+| `slurmTop.diskColumns` | the disks table |
+
+Some columns start unticked because most people do not want them every day:
+total cores and memory in use on the machines table, the drain reason as a
+sortable column of its own, the socket/core/thread layout, and the partition
+and load of a GPU machine. Tick one and it appears; untick a crowded table's
+widest columns and the rest stop scrolling off the side.
+
+The sidebar drops the widest columns to fit its ~300px, which is why the CPU
+model and GRES are missing there. Once you have chosen a table's columns
+yourself, it stops doing that and shows exactly what you asked for — so a
+column you ticked on purpose appears in both views.
 
 ## Watching more than one cluster
 
@@ -122,9 +146,10 @@ totals that does not say whose they are is the one thing worth keeping apart.
 
 ![Two clusters merged into one set of tables](assets/ext-two-servers.png)
 
-GPUs are merged per model rather than per machine: a cluster with eight A100s
-and another with two gives one `a100` row of ten, and the SERVER column names
-both. Open it and the job list spans both clusters.
+The GPU table stays one row per machine even when merged: "three a100 free
+somewhere" is not something you can submit against, so the row names the
+machine that has them, its cluster, and the memory and cores that come with
+them. Sort by FREE to see where there is room across every cluster at once.
 
 `slurmTop.mergeServers` changes this per section, and is a grid of checkboxes in
 the settings editor. Turn `jobs` off and the jobs table splits into one panel
@@ -282,6 +307,10 @@ command says so rather than failing if the package is missing.
 | `slurmTop.sidebarSections` | all five | Which sections the narrow view shows, in order. Panels there fold by clicking the header. The dashboard always shows all five. |
 | `slurmTop.detailsIn` | `"window"` | `window` for a floating window of its own, `popup` for a command-palette-style list, `card` for a centred card in a tab, `tab` for a plain editor tab, `overlay` for a panel inside the view. |
 | `slurmTop.defaultOwnerFilter` | `"me"` | Whose jobs to show on open. |
+| `slurmTop.jobColumns` | every column | Which columns the jobs table shows, as a grid of checkboxes. |
+| `slurmTop.nodeColumns` | see below | Which columns the machines table shows. |
+| `slurmTop.gpuColumns` | see below | Which columns the GPU table shows. |
+| `slurmTop.diskColumns` | every column | Which columns the disks table shows. |
 | `slurmTop.cpuProbeUsesSrun` | `true` | When reading a machine's CPU model, fall back to a one-second Slurm job if `ssh` to that node is refused. Probes only ever run when you ask for one. |
 
 ## How it gets its data
@@ -325,7 +354,10 @@ npm run compile   # also refreshes the bundled Python copy
 npm test          # headless checks, no VS Code needed
 ```
 
-`npm test` runs five suites. `test/webview.smoke.js` drives `media/main.js` in
+`npm test` runs six suites. `test/columns.smoke.js` checks that the columns in
+`media/main.js`, the defaults in `src/columns.ts` and the checkbox schema in
+`package.json` all describe the same list -- run `npm run sync-columns` after
+adding a column and it regenerates the schema. `test/webview.smoke.js` drives `media/main.js` in
 jsdom against a fixture snapshot and checks that tables fill, filters and sorts
 apply, rows update in place rather than duplicating, and the detail overlays
 render. `test/multiserver.smoke.js` drives the same script against a snapshot carrying

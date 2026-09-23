@@ -1,30 +1,46 @@
 # Changelog
 
-## 0.8.0
+## 0.9.0
 
 ### Added
 
-- **Filter the machines table, the way the jobs table filters.** The nodes
-  panel gains the same strip of menus: which cluster, what the machine is
-  doing (idle, mixed, allocated, drained/down), which partition it belongs to,
-  whether it has GPUs and whether any are free, and a search box over the
-  name, state, drain reason, partition, GRES and CPU model. The count in the
-  panel title reads `4/29` while a filter is on, so a narrowed table never
-  looks like a short cluster. The choices are remembered across reloads, and
-  the partition menu restocks itself as clusters report in.
+- **Choose the columns, per table.** Every field the collector reports now has
+  a column, and `slurmTop.jobColumns`, `slurmTop.nodeColumns`,
+  `slurmTop.gpuColumns` and `slurmTop.diskColumns` say which to show -- each a
+  grid of checkboxes in the settings editor. New columns, unticked by default:
+  total cores and memory in use on a machine, the drain reason as a sortable
+  column of its own, the socket/core/thread layout, and a GPU machine's
+  partition and load. The sidebar still drops its widest columns to fit, and
+  stops doing so once you have chosen that table's columns yourself.
+- **The GPU table is one row per machine per model.** "Three a100 free
+  somewhere on the cluster" is not something you can submit against, so a row
+  now names the machine, how many of its cards are spare, and the free memory
+  and idle cores that come with them. It filters by cluster, by model and by
+  availability, where `free and usable` leaves out a machine that has a card
+  idle but is drained. Opening a row lists the jobs holding that model there,
+  and links through to the machine.
+- **Free GPUs and idle cores on the machines table.** A `GPU FREE` column
+  beside the used/installed one, and `IDLE` now survives into the sidebar
+  alongside free memory -- between them, whether a job would fit.
+- **Filters for the machines table**, matching the jobs table: cluster, state
+  (idle / mixed / allocated / drained or down), partition, GPUs, and a search
+  over the name, drain reason, GRES and CPU model. The partition menu is
+  stocked from the snapshot and restocks as clusters report in.
 
 ### Fixed
 
-- **Columns lined up with the wrong headers in a narrow view.** Cells drawing
-  a bar were laid out with `display: flex`, which overrides `display:
-  table-cell` and takes the cell out of the table: the browser wrapped it in
-  an anonymous cell, rows split over two lines and every value drifted one
-  heading to the left. In the sidebar that made a node's `GPU U/T` read as its
-  `MEM FREE` -- a machine with one idle GPU showed `0/1` under MEM FREE. The
-  bar is laid out inline now, so the cell stays in its column at any width.
+- **Columns lined up with the wrong headers in a narrow view.** Cells drawing a
+  bar were laid out with `display: flex`, which overrides `display: table-cell`
+  and takes the cell out of the table: the browser wrapped it in an anonymous
+  cell, rows split over two lines and every value drifted one heading to the
+  left. In the sidebar that made a node's `GPU U/T` read as its `MEM FREE` -- a
+  machine with one idle GPU showed `0/1` under MEM FREE.
 
-This supersedes 0.7.0, 0.7.1 and 0.7.2, which were uploaded but never came out
-of the Marketplace's validation pipeline and so were never served.
+## 0.8.0
+
+Never published: its notes are folded into 0.9.0 above. 0.7.0, 0.7.1 and 0.7.2
+were uploaded to the Marketplace but never came out of its validation pipeline,
+so none of them were ever served either.
 
 ## 0.7.1
 

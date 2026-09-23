@@ -4,6 +4,7 @@ import { ClusterClient } from './cluster';
 import { detailPresentation, openDetailWindow, openJobOutput } from './detail';
 import { showDetailQuickPick } from './quickpick';
 import { readMergeSettings } from './servers';
+import { readColumnSettings } from './columns';
 import { DetailTarget, HostMessage, ViewMessage } from './types';
 
 export type Variant = 'sidebar' | 'dashboard' | 'detail' | 'modal';
@@ -61,6 +62,7 @@ function sectionsFor(variant: Variant): string[] {
 
 function configMessage(variant: Variant, client: ClusterClient): HostMessage {
   const settings = vscode.workspace.getConfiguration('slurmTop');
+  const columns = readColumnSettings();
   return {
     type: 'config',
     sections: sectionsFor(variant),
@@ -69,6 +71,8 @@ function configMessage(variant: Variant, client: ClusterClient): HostMessage {
     detailsIn: detailPresentation(),
     servers: client.servers.map((spec) => ({ id: spec.id, name: client.nameOf(spec.id) })),
     merge: readMergeSettings(),
+    columns: columns.columns,
+    columnsChosen: columns.chosen,
   };
 }
 

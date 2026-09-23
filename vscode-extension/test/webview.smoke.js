@@ -96,7 +96,8 @@ function run(variant, sections, detailsIn) {
     if (!panel || section === 'summary') continue;
     const rows = panel.querySelectorAll('tbody tr');
     const expected = { jobs: snapshot.jobs.length, nodes: snapshot.nodes.length, disks: snapshot.disks.length,
-      gpus: Object.keys(snapshot.gpu.per_type_stats).length }[section];
+      // One row per machine per GPU model, not one per model.
+      gpus: snapshot.nodes.reduce((n, node) => n + Object.keys(node.gpu_inventory || {}).length, 0) }[section];
     check(`${section} rows rendered`, rows.length === expected, `${rows.length} vs ${expected}`);
     const cells = rows.length ? rows[0].querySelectorAll('td').length : 0;
     const headers = panel.querySelectorAll('thead th').length;
@@ -250,9 +251,10 @@ function run(variant, sections, detailsIn) {
       partitions.join(',') === 'all,cpu,gpu', partitions.join(','));
 
     pick(stateSelect, 'idle');
-    check('no node is idle in the fixture', ids().length === 0, ids().join(','));
+    check('idle keeps only the idle machine', ids().join(',') === 'gpu02', ids().join(','));
     pick(stateSelect, 'unavailable');
-    check('the drained node is the unavailable one', ids().join(',') === 'cpu03', ids().join(','));
+    check('drained and down machines are the unavailable ones',
+      ids().join(',') === 'cpu03,gpu03', ids().join(','));
     pick(stateSelect, 'mixed');
     check('a mixed node is not counted as unavailable', ids().join(',') === 'gpu01', ids().join(','));
     pick(stateSelect, 'all');
@@ -260,12 +262,13 @@ function run(variant, sections, detailsIn) {
     pick(partitionSelect, 'cpu');
     check('partition filter applies', ids().join(',') === 'cpu01,cpu03', ids().join(','));
     pick(partitionSelect, 'gpu');
-    check('the default partition matches without its star', ids().join(',') === 'gpu01', ids().join(','));
+    check('the default partition matches without its star',
+      ids().join(',') === 'gpu01,gpu02,gpu03', ids().join(','));
     pick(partitionSelect, 'all');
 
     pick(gpuSelect, 'free');
-    check('GPUs-free filter keeps only the node with one spare',
-      ids().join(',') === 'gpu01', ids().join(','));
+    check('GPUs-free filter keeps the machines with a spare card',
+      ids().join(',') === 'gpu01,gpu02,gpu03', ids().join(','));
     pick(gpuSelect, 'none');
     check('no-GPU filter keeps the plain machines', ids().join(',') === 'cpu01,cpu03', ids().join(','));
     pick(gpuSelect, 'all');
@@ -285,14 +288,72 @@ function run(variant, sections, detailsIn) {
     // has scrolled out of view.
     pick(gpuSelect, 'none');
     check('a filtered nodes panel counts shown out of total',
-      nodesPanel.querySelector('.panel-count').textContent === '2/3',
+      nodesPanel.querySelector('.panel-count').textContent === '2/5',
       nodesPanel.querySelector('.panel-count').textContent);
     pick(gpuSelect, 'all');
     check('an unfiltered nodes panel counts plainly',
-      nodesPanel.querySelector('.panel-count').textContent === '3',
+      nodesPanel.querySelector('.panel-count').textContent === '5',
       nodesPanel.querySelector('.panel-count').textContent);
 
     check('node filters are persisted', (window.eval('__state') || {}).nodeGpuFilter === 'all');
+  }
+
+  // The GPU table is one row per machine per model, and filters like one.
+  const gpusPanel = doc.querySelector("[data-section='gpus']");
+  if (gpusPanel) {
+    const ids = () => Array.from(gpusPanel.querySelectorAll('tbody tr')).map((tr) => tr.dataset.id);
+    const headerText = Array.from(gpusPanel.querySelectorAll('thead th')).map((th) => th.textContent);
+    check('GPU table names the machine', headerText.includes('NODE'), headerText.join(','));
+    check('GPU table shows free memory', headerText.includes('MEM FREE'), headerText.join(','));
+    check('a GPU row is a machine and a model',
+      ids().join(',') === 'gpu01/a100,gpu02/v100,gpu03/v100', ids().join(','));
+
+    const rowOf = (id) => Array.from(gpusPanel.querySelectorAll('tbody tr')).find((tr) => tr.dataset.id === id);
+    const cellOf = (id, label) => rowOf(id).querySelectorAll('td')[headerText.indexOf(label)].textContent;
+    check('the used column counts that machine only', cellOf('gpu01/a100', 'GPU U/T') === '2/4',
+      cellOf('gpu01/a100', 'GPU U/T'));
+    check('free memory comes from the machine', cellOf('gpu01/a100', 'MEM FREE') === '439.0G',
+      cellOf('gpu01/a100', 'MEM FREE'));
+    check('spare cores come from the machine', cellOf('gpu02/v100', 'CPU IDLE') === '64',
+      cellOf('gpu02/v100', 'CPU IDLE'));
+
+    const selects = Array.from(gpusPanel.querySelectorAll('.panel-head select'));
+    const pick = (node, value) => {
+      node.value = value;
+      node.dispatchEvent(new window.Event('change'));
+    };
+    check('GPU panel has model and availability menus', selects.length === 2, String(selects.length));
+    const [typeSelect, freeSelect] = selects;
+    check('the model menu lists what is installed',
+      Array.from(typeSelect.options).map((o) => o.value).join(',') === 'all,a100,v100',
+      Array.from(typeSelect.options).map((o) => o.value).join(','));
+
+    pick(typeSelect, 'v100');
+    check('filtering by model keeps only that model',
+      ids().join(',') === 'gpu02/v100,gpu03/v100', ids().join(','));
+    pick(typeSelect, 'all');
+
+    // gpu03 has a card free but is drained, so it is free without being usable.
+    pick(freeSelect, 'free');
+    check('free keeps every machine with a spare card',
+      ids().join(',') === 'gpu01/a100,gpu02/v100,gpu03/v100', ids().join(','));
+    pick(freeSelect, 'available');
+    check('a drained machine is free but not usable',
+      ids().join(',') === 'gpu01/a100,gpu02/v100', ids().join(','));
+    pick(freeSelect, 'busy');
+    check('nothing in the fixture is fully busy', ids().length === 0, ids().join(','));
+    pick(freeSelect, 'all');
+
+    const search = gpusPanel.querySelector("input[type='search']");
+    search.value = 'firmware';
+    search.dispatchEvent(new window.Event('input'));
+    check('GPU search reaches the drain reason', ids().join(',') === 'gpu03/v100', ids().join(','));
+    search.value = '';
+    search.dispatchEvent(new window.Event('input'));
+
+    check('the GPU counter totals the rows on screen',
+      gpusPanel.querySelector('.panel-count').textContent === '5 free / 7',
+      gpusPanel.querySelector('.panel-count').textContent);
   }
 
   // Collapsing a sidebar panel must hide its body and survive as state.
@@ -479,8 +540,89 @@ function runModal() {
     postedOf().filter((m) => m.type === 'closeDetail').length > before + 1);
 }
 
+/**
+ * The settings page decides which columns a table has.
+ *
+ * Two things matter beyond "the column disappears": a column the user ticks on
+ * has to survive the narrow sidebar, which otherwise drops the wide ones, and
+ * changing the setting has to rebuild the table rather than leave the old
+ * headers in place.
+ */
+function runColumnSettings() {
+  console.log('\ncolumn settings:');
+  const sections = ['nodes', 'gpus'];
+
+  const open = (variant, columns, chosen) => {
+    const { window, send } = makeWindow(variant);
+    send({ type: 'config', sections, ownerFilter: 'all', interval: 3, detailsIn: 'overlay',
+      columns, columnsChosen: chosen });
+    send({ type: 'snapshot', snapshot });
+    return window.document;
+  };
+  const headersOf = (doc, section) =>
+    Array.from(doc.querySelectorAll(`[data-section='${section}'] thead th`)).map((th) => th.textContent);
+
+  const plain = open('dashboard', {}, {});
+  check('with no setting the table keeps its usual columns',
+    headersOf(plain, 'nodes').includes('MEM FREE') && headersOf(plain, 'nodes').includes('GPU FREE'),
+    headersOf(plain, 'nodes').join(','));
+  check('and leaves the off-by-default ones out',
+    !headersOf(plain, 'nodes').includes('REASON') && !headersOf(plain, 'nodes').includes('SCT'),
+    headersOf(plain, 'nodes').join(','));
+
+  const hidden = open('dashboard', { nodes: { mem_free: false, load: false } }, { nodes: true });
+  check('unticking a column removes it',
+    !headersOf(hidden, 'nodes').includes('MEM FREE') && !headersOf(hidden, 'nodes').includes('LOAD'),
+    headersOf(hidden, 'nodes').join(','));
+  check('the other columns stay', headersOf(hidden, 'nodes').includes('GPU U/T'),
+    headersOf(hidden, 'nodes').join(','));
+
+  const shown = open('dashboard', { nodes: { reason: true, topology: true } }, { nodes: true });
+  check('ticking an off-by-default column adds it',
+    headersOf(shown, 'nodes').includes('REASON') && headersOf(shown, 'nodes').includes('SCT'),
+    headersOf(shown, 'nodes').join(','));
+
+  // CPU is compactHide: the sidebar drops it by default, and stops doing so
+  // once the user has chosen this table's columns.
+  const narrowDefault = open('sidebar', {}, {});
+  check('the sidebar still drops wide columns by default',
+    !headersOf(narrowDefault, 'nodes').includes('CPU'),
+    headersOf(narrowDefault, 'nodes').join(','));
+  const narrowChosen = open('sidebar', { nodes: { cpu: true } }, { nodes: true });
+  check('a column chosen on the settings page survives the sidebar',
+    headersOf(narrowChosen, 'nodes').includes('CPU'),
+    headersOf(narrowChosen, 'nodes').join(','));
+
+  const gpuTrimmed = open('dashboard', { gpus: { mem_free: false, cpus_idle: false } }, { gpus: true });
+  check('the GPU table honours its own setting',
+    !headersOf(gpuTrimmed, 'gpus').includes('MEM FREE') &&
+    !headersOf(gpuTrimmed, 'gpus').includes('CPU IDLE') &&
+    headersOf(gpuTrimmed, 'gpus').includes('NODE'),
+    headersOf(gpuTrimmed, 'gpus').join(','));
+  check('one table\'s setting does not disturb another',
+    headersOf(gpuTrimmed, 'nodes').includes('MEM FREE'),
+    headersOf(gpuTrimmed, 'nodes').join(','));
+
+  // A settings change arriving mid-session has to relayout, not just refill.
+  const { window, send } = makeWindow('dashboard');
+  send({ type: 'config', sections, ownerFilter: 'all', interval: 3, detailsIn: 'overlay' });
+  send({ type: 'snapshot', snapshot });
+  const before = Array.from(window.document.querySelectorAll("[data-section='nodes'] thead th"))
+    .map((th) => th.textContent);
+  send({ type: 'config', sections, ownerFilter: 'all', interval: 3, detailsIn: 'overlay',
+    columns: { nodes: { gres: false } }, columnsChosen: { nodes: true } });
+  const after = Array.from(window.document.querySelectorAll("[data-section='nodes'] thead th"))
+    .map((th) => th.textContent);
+  check('a settings change rebuilds the table there and then',
+    before.includes('GRES') && !after.includes('GRES'), `${before.join(',')} -> ${after.join(',')}`);
+  check('and the rows come back with it',
+    window.document.querySelectorAll("[data-section='nodes'] tbody tr").length === snapshot.nodes.length,
+    String(window.document.querySelectorAll("[data-section='nodes'] tbody tr").length));
+}
+
 run('dashboard', ['summary', 'jobs', 'nodes', 'gpus', 'disks'], 'overlay');
 run('sidebar', ['summary', 'jobs', 'nodes', 'gpus', 'disks'], 'popup');
+runColumnSettings();
 runDetailWindow();
 runModal();
 
