@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.11.0
+
+### Added
+
+- **One cluster is never listed twice.** Each collector now reports which
+  Slurm cluster it reads (`ClusterName` and controller). Two rows that reach the
+  same one -- `here` in a window on a host the list also names by address, or
+  two login nodes of one cluster -- show its jobs, machines and totals once,
+  under the first row; the other says *same cluster as …* in its box and in
+  the status line. If the first row stops answering, the second takes over.
+- **An address that is this machine is read directly.** A server written as an
+  ssh destination that resolves to the host the window runs on, as the same
+  user, runs its collector locally rather than over ssh to itself. So one
+  `slurmTop.servers` list, written as addresses, works unchanged from every
+  machine you connect to.
+
+### Fixed
+
+- **An installed collector is found even when only an interactive shell knows
+  it.** Over ssh the command runs in a non-interactive shell, which skips the
+  conda block in `.bashrc`; an installed `slurm-top` went unseen, and the
+  bundled copy was sent instead -- which some hosts cut off mid-stream
+  (`Connection ... closed by remote host`, retried forever). The login shell is
+  now asked once where `slurm-top` is, and that path is run before the bundled
+  copy is tried.
+
 ## 0.10.0
 
 ### Added

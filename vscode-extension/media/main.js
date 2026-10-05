@@ -1267,6 +1267,11 @@
       }
     }
 
+    // A panel of its own for a server that duplicates another says where its
+    // rows went, rather than looking like a cluster with nothing on it.
+    const note = panel.server ? duplicateNote(serverInfo(panel.server)) : '';
+    const emptyText = note || 'Nothing to show';
+    if (panel.empty.textContent !== emptyText) panel.empty.textContent = emptyText;
     panel.empty.classList.toggle('hidden', rows.length > 0);
     panel.table.classList.toggle('hidden', rows.length === 0);
 
@@ -1339,7 +1344,19 @@
     if (node.tr.className !== cls) node.tr.className = cls;
   }
 
+  /**
+   * Why a server shows nothing: it reaches a cluster another server in the
+   * list already shows, so its rows were left out of the merge.
+   */
+  function duplicateNote(server) {
+    if (!server || !server.duplicate_of) return '';
+    const owner = serverName(server.duplicate_of);
+    const cluster = server.cluster ? ` (${server.cluster})` : '';
+    return `Same Slurm cluster${cluster} as ${owner}; its jobs are listed under ${owner}.`;
+  }
+
   function stateLabel(server) {
+    if (server && server.duplicate_of && server.state === 'running') return `= ${serverName(server.duplicate_of)}`;
     if (!server || server.state === 'running') return '';
     if (server.state === 'error') return 'error';
     if (server.state === 'starting') return 'starting…';
@@ -1425,11 +1442,13 @@
     if (!server && servers.length > 1) {
       chips.textContent = '';
       for (const info of servers) {
-        const label = stateLabel(info) || `${info.counts ? info.counts.jobs : 0} jobs`;
+        const label = info.duplicate_of && info.state === 'running'
+          ? `same cluster as ${serverName(info.duplicate_of)}`
+          : stateLabel(info) || `${info.counts ? info.counts.jobs : 0} jobs`;
         chips.appendChild(
           el('span', {
             class: `server-chip${info.state === 'error' ? ' error-text' : ''}`,
-            title: info.message || info.host || info.id,
+            title: duplicateNote(info) || info.message || info.host || info.id,
             text: `${info.name || info.id}: ${label}`,
           })
         );
@@ -1439,9 +1458,10 @@
       chips.classList.add('hidden');
     }
 
-    const message = server && server.state === 'error' ? server.message : '';
+    const failure = server && server.state === 'error' ? server.message : '';
+    const message = failure || duplicateNote(server);
     panel.note.textContent = message || '';
-    panel.note.className = `server-note error-text${message ? '' : ' hidden'}`;
+    panel.note.className = `server-note${failure ? ' error-text' : ''}${message ? '' : ' hidden'}`;
   }
 
   function updateAll() {

@@ -38,6 +38,7 @@ from .data import (
     job_output,
     job_output_paths,
     job_usage_metrics,
+    cluster_identity,
     cpu_counts,
     cpu_speed,
     cpu_topology,
@@ -188,6 +189,9 @@ def snapshot() -> Dict[str, Any]:
         "timestamp": time.time(),
         "user": user,
         "host": socket.gethostname(),
+        # Which Slurm cluster this is, so two servers that reach the same one
+        # can be told apart from two that merely look alike.
+        "cluster": cluster_identity(),
         "pinned": load_pinned_jobs(),
         "jobs": [job_dict(j) for j in jobs],
         "nodes": [node_dict(n, cpu_info) for n in nodes],

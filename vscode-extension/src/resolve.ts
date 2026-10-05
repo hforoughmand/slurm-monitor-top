@@ -1,8 +1,10 @@
-import { spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import * as dns from 'dns';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { payloadSize, pushedCollector, shortArgv } from './remote';
+import { payloadSize, pushedCollector, shellQuote, shortArgv } from './remote';
 import { ServerSpec } from './servers';
 
 /** An argv prefix that prints slurm-top JSON when data-mode flags are appended. */
@@ -21,19 +23,123 @@ export interface Collector {
  */
 const HELP_MARKER = '--watch';
 
+/** Run a command for its output; '' on any failure, including a timeout. */
+function capture(argv: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve) => {
+    const child = execFile(argv[0], argv.slice(1), { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (err, out) =>
+      resolve(err ? '' : String(out))
+    );
+    // An interactive shell on the far side must not sit waiting for input.
+    child.stdin?.end();
+  });
+}
+
+/**
+ * Whether an ssh address leads straight back to this machine, as this user.
+ *
+ * What lets one `slurmTop.servers` list serve every machine it is used from:
+ * the list names each cluster by its address, and whichever of them the
+ * editor happens to be running on is read directly rather than through a
+ * pointless ssh to itself. A list that says `here` cannot do that -- `here` is
+ * a different machine in every window, which is how one cluster ends up
+ * listed twice under two names.
+ *
+ * `ssh -G` applies ~/.ssh/config without connecting, so an alias resolves to
+ * the host it stands for. A jump host or proxy means the name is resolved over
+ * there, so such an address is never taken for this machine; nor is one that
+ * logs in as somebody else, whose jobs and pins are not ours.
+ */
+export async function isThisMachine(ssh: string[]): Promise<boolean> {
+  const config = await capture(['ssh', '-G', ...ssh.slice(1)], 5000);
+  const option = (name: string) =>
+    (config.match(new RegExp(`^${name} (.*)$`, 'mi'))?.[1] ?? '').trim();
+  const hostname = option('hostname');
+  if (!hostname) {
+    return false;
+  }
+  for (const via of ['proxyjump', 'proxycommand']) {
+    const value = option(via);
+    if (value && value !== 'none') {
+      return false;
+    }
+  }
+  const user = option('user');
+  if (user && user !== os.userInfo().username) {
+    return false;
+  }
+
+  if (hostname.toLowerCase() === os.hostname().toLowerCase()) {
+    return true;
+  }
+  // By address, for a name that is not the hostname: a domain-qualified one,
+  // a DNS alias, an interface's IP, `localhost`. Never by the short name
+  // alone -- `metis` at another site is another machine.
+  const mine = new Set(
+    Object.values(os.networkInterfaces())
+      .flat()
+      .map((iface) => iface?.address)
+      .filter((address): address is string => !!address)
+  );
+  try {
+    const addresses = await dns.promises.lookup(hostname, { all: true });
+    return addresses.some((entry) => mine.has(entry.address));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Where a login shell over ssh would find `slurm-top`, or undefined.
+ *
+ * ssh runs a command in a non-interactive shell, and that is exactly the
+ * shell conda's `.bashrc` block and most `PATH` edits are skipped in. So a
+ * collector that is installed, and that the user runs every day, is still not
+ * found -- and the bundled copy gets sent instead, which costs a 26KB payload
+ * on every start and which some machines cut off. An interactive shell is asked
+ * once, and the collector is then run by its full path, with no shell setup.
+ */
+export async function findInstalledOverSsh(ssh: string[], timeoutMs = 25000): Promise<string | undefined> {
+  // `$SHELL` is expanded over there: the shell the user actually logs in with.
+  const out = await capture([...ssh, '"$SHELL"', '-ic', shellQuote('command -v slurm-top')], timeoutMs);
+  // An interactive shell may print a banner; the answer is the last path.
+  const paths = out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^\/\S*\/slurm-top$/.test(line));
+  return paths[paths.length - 1];
+}
+
+/**
+ * One way of running the collector, or one to work out on demand.
+ *
+ * Lazy because working it out costs an ssh connection, which is not worth
+ * paying while a cheaper candidate before it might still answer.
+ */
+type Candidate = Collector | (() => Promise<Collector | undefined>);
+
 /** Candidates in priority order: explicit override, installed CLI, bundled copy. */
-function candidates(spec: ServerSpec, extensionPath: string): Collector[] {
+function candidates(spec: ServerSpec, extensionPath: string): Candidate[] {
   if (spec.ssh) {
     // An address that named a machine rather than a command: try the collector
     // it may have, then the module it may have, and failing both send it one.
     // Ordered by what each costs -- an installed collector needs no payload,
     // and the pushed copy needs nothing of the cluster at all.
     const where = spec.ssh[spec.ssh.length - 1];
-    const list: Collector[] = [
+    const ssh = spec.ssh;
+    const list: Candidate[] = [
       { argv: spec.command, origin: `slurm-top on ${where}` },
       {
-        argv: [...spec.ssh, 'python3', '-m', 'slurm_top.export'],
+        argv: [...ssh, 'python3', '-m', 'slurm_top.export'],
         origin: `python3 -m slurm_top.export on ${where}`,
+      },
+      async () => {
+        const found = await findInstalledOverSsh(ssh);
+        return found
+          ? {
+              argv: [...ssh, shellQuote(found), '--json'],
+              origin: `${found} on ${where} (on the PATH of an interactive shell only)`,
+            }
+          : undefined;
       },
     ];
     for (const interpreter of ['python3', 'python']) {
@@ -175,11 +281,23 @@ export async function resolveCollector(
   extensionPath: string,
   log: vscode.OutputChannel
 ): Promise<Collector | undefined> {
-  const list = candidates(spec, extensionPath);
+  let target = spec;
+  if (spec.ssh && (await isThisMachine(spec.ssh))) {
+    log.appendLine(
+      `collector: ${spec.ssh[spec.ssh.length - 1]} is this machine, as this user; ` +
+        'reading it directly instead of over ssh'
+    );
+    target = { ...spec, ssh: undefined, command: [] };
+  }
+  const list = candidates(target, extensionPath);
   // ssh has to open a connection before anything runs, which takes longer than
   // starting a local interpreter ever would.
-  const timeout = spec.command.length ? 25000 : 8000;
-  for (const candidate of list) {
+  const timeout = target.command.length ? 25000 : 8000;
+  for (const entry of list) {
+    const candidate = typeof entry === 'function' ? await entry() : entry;
+    if (!candidate) {
+      continue;
+    }
     const { ok, reason } = await probe(candidate, timeout);
     if (ok) {
       log.appendLine(`collector: using ${candidate.origin} -> ${shortArgv(candidate.argv)}`);

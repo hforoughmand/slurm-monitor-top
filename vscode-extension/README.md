@@ -102,6 +102,31 @@ Each row gets a collector process of its own, so one cluster being slow or
 unreachable does not hold up the rest: a server that stops answering says so in
 its own box while the others keep refreshing.
 
+### One list for every machine you connect to
+
+`slurmTop.servers` is a user setting, so under Remote - SSH every window gets
+the same list, whichever host it is connected to — and `here` means a
+different machine in each. Name every cluster by its address instead:
+
+```jsonc
+"slurmTop.servers": {
+  "metis": "me@metis.example.org",
+  "hzi":   "me@login01.example.org"
+}
+```
+
+An address that turns out to be the machine the window is running on, as the
+same user, is read directly rather than through an ssh to itself; the others go
+over ssh. So the list works unchanged from either machine, and from a third one
+that is neither. (`ssh -G` resolves the address, so `~/.ssh/config` aliases
+count; one that goes through a jump host or logs in as someone else never does.)
+
+If two rows still end up on one Slurm cluster — `here` plus an address for the
+same machine, or two login nodes of one cluster — its jobs are listed once,
+under the first row, and the other row says *same cluster as …* instead of
+showing everything twice. Each collector reports the cluster's `ClusterName`
+and controller, which is how they are told apart.
+
 ### What an ssh server needs
 
 Only ssh and a Python. The extension carries its own copy of the collector, so
@@ -111,13 +136,14 @@ there. Nothing is written to that machine and nothing is left behind — and
 `squeue`, `sinfo` and `scontrol` are read by the same parsers as everywhere
 else, so the numbers cannot drift between clusters.
 
-Given a destination, three things are tried in order, cheapest first, and
-whichever answers is used for the rest of the session:
+Given a destination, these are tried in order, cheapest first, and whichever
+answers is used for the rest of the session:
 
 | | |
 |---|---|
 | `slurm-top --json` | it is installed there and on the `PATH` of a non-interactive login |
 | `python3 -m slurm_top.export` | the package is importable but its script is not on `PATH` — what `pip install --user` leaves you with |
+| `slurm-top` by its full path | it is installed, but only an interactive shell finds it — a conda environment set up in `.bashrc`. Your login shell is asked once where it is |
 | the copy from here, sent over | nothing at all is installed there; 26KB of argument per connection |
 
 **Slurm: Show Extension Log** names the one that won, and quotes what the others

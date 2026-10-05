@@ -292,6 +292,36 @@ def _parse_scontrol_kv(text: str) -> Dict[str, str]:
     return result
 
 
+_cluster_identity: Dict[str, str] = {}
+
+
+def cluster_identity() -> Dict[str, str]:
+    """Which Slurm cluster this machine talks to: its name and controller.
+
+    Lets a front end watching several servers notice that two of them are the
+    same cluster - two login nodes, or one address that turned out to be the
+    machine it runs on - and count its jobs once. The name alone is not enough:
+    two unrelated sites can both call theirs `cluster`.
+
+    Read once per process: it does not change under a running collector, and
+    `scontrol show config` asks the controller, which a 3-second poll must not.
+    A failed read is not remembered, so the next snapshot tries again.
+    """
+    if _cluster_identity:
+        return dict(_cluster_identity)
+    config: Dict[str, str] = {}
+    for line in run_cmd_argv(["scontrol", "show", "config"]).splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            config.setdefault(key.strip(), value.strip())
+    # `SlurmctldHost[0]` since Slurm 18.08; `ControlMachine` before it.
+    controller = config.get("SlurmctldHost[0]") or config.get("ControlMachine", "")
+    identity = {"name": config.get("ClusterName", ""), "controller": controller}
+    if identity["name"] or identity["controller"]:
+        _cluster_identity.update(identity)
+    return identity
+
+
 def fetch_job_detail(job_id: str) -> Dict[str, str]:
     """Detailed key/value fields for a job from `scontrol show job -d`."""
     raw = run_cmd_argv(["scontrol", "show", "job", "-d", job_id])

@@ -150,8 +150,19 @@ export interface Snapshot {
   pinned?: string[];
   gpu: GpuStats;
   summary: Record<'all' | 'me' | 'others', SummaryBucket>;
+  /**
+   * The Slurm cluster behind the snapshot. Absent from collectors that predate
+   * it, and empty when `scontrol show config` did not answer.
+   */
+  cluster?: ClusterIdentity;
   /** Present instead of the data fields when the collector hit a transient error. */
   error?: string;
+}
+
+/** `ClusterName` and the first `SlurmctldHost`, as the collector read them. */
+export interface ClusterIdentity {
+  name: string;
+  controller: string;
 }
 
 // --------------------------------------------------------------- many servers
@@ -179,6 +190,14 @@ export interface ServerView {
   summary: Record<'all' | 'me' | 'others', SummaryBucket>;
   pinned: string[];
   counts: { jobs: number; nodes: number; disks: number };
+  /** The Slurm cluster's name, when the collector reported it. */
+  cluster?: string;
+  /**
+   * Set when this server reaches the same cluster as an earlier one in the
+   * list: the id of that one. Its rows and totals are left out of the merge,
+   * since they are that server's rows again.
+   */
+  duplicate_of?: string;
 }
 
 /** Which server a row came from; added on merge, never emitted by a collector. */

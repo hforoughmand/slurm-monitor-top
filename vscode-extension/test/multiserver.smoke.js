@@ -394,7 +394,44 @@ function runDetailWindow() {
     doc.getElementById('root').textContent.slice(0, 80));
 }
 
+/**
+ * Two servers on one cluster: the host has already left the second one's rows
+ * out, and the view has to say why rather than show an empty cluster.
+ */
+function runDuplicate() {
+  console.log('\nsame cluster twice:');
+  const { window, send } = makeWindow('dashboard');
+  const doc = window.document;
+  const snapshot = mergedSnapshot();
+  snapshot.jobs = snapshot.jobs.filter((j) => j.server === 'alpha');
+  snapshot.servers[1] = Object.assign({}, snapshot.servers[1], {
+    duplicate_of: 'alpha', cluster: 'bioinf', counts: { jobs: 0, nodes: 0, disks: 0 },
+  });
+
+  send(config({ summary: true, jobs: false, nodes: true, gpus: true, disks: true }));
+  send({ type: 'snapshot', snapshot });
+
+  const chip = Array.from(doc.querySelectorAll('.server-chip')).find((c) => c.textContent.startsWith('beta'));
+  check('the chip says whose cluster it is',
+    chip && chip.textContent === 'beta: same cluster as alpha', chip && chip.textContent);
+  check('without calling it an error', chip && !chip.className.includes('error-text'));
+  const betaJobs = doc.querySelector("[data-panel='jobs#beta']");
+  const empty = betaJobs && betaJobs.querySelector('.empty');
+  check("its own jobs panel says where its rows are",
+    empty && !empty.classList.contains('hidden') && empty.textContent.includes('listed under alpha'),
+    empty && empty.textContent);
+
+  send(config({ summary: false, jobs: false, nodes: true, gpus: true, disks: true }));
+  const box = doc.querySelector("[data-panel='summary#beta']");
+  const note = box && box.querySelector('.server-note');
+  check('its summary box carries the note',
+    note && !note.classList.contains('hidden') && note.textContent.includes('Same Slurm cluster (bioinf) as alpha'),
+    note && note.textContent);
+  check('as a note, not an error', note && !note.className.includes('error-text'));
+}
+
 runMerged();
+runDuplicate();
 runSeparate();
 runSingleServer();
 runDetailWindow();

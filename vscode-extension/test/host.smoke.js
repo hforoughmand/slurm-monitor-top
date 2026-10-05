@@ -338,9 +338,12 @@ async function checkPushedCollector() {
 /** The merge layer: two clusters in one snapshot. */
 function checkMerge(snapshot) {
   console.log('\nmerge:');
+  // The same rows twice, but from two different clusters as far as the
+  // collector can tell: the case of two sites that happen to look alike.
+  const elsewhere = Object.assign({}, snapshot, { cluster: { name: 'other', controller: 'head.example' } });
   const entries = [
     { id: 'alpha', name: 'alpha', state: 'running', snapshot },
-    { id: 'beta', name: '', state: 'running', snapshot },
+    { id: 'beta', name: '', state: 'running', snapshot: elsewhere },
   ];
   const merged = mergeSnapshots(entries);
   check('rows from both servers are present',
@@ -368,6 +371,43 @@ function checkMerge(snapshot) {
     { id: 'beta', name: 'beta', state: 'error', message: 'boom' },
   ]);
   check('all of them failing is an error', allBroken.state === 'error', JSON.stringify(allBroken));
+
+  // Two servers on one cluster -- `here` in a window on a machine the list
+  // also names by address -- list its jobs once, under the first.
+  const cluster = { name: 'bioinf', controller: 'head01' };
+  const one = Object.assign({}, snapshot, { cluster });
+  const same = [
+    { id: 'metis', name: 'metis', state: 'running', snapshot: one },
+    { id: 'hzi', name: 'hzi', state: 'running', snapshot: Object.assign({}, one, { host: 'login02' }) },
+  ];
+  const deduped = mergeSnapshots(same);
+  check('the cluster is reported once collector reports it',
+    typeof snapshot.cluster === 'object' && 'name' in snapshot.cluster, JSON.stringify(snapshot.cluster));
+  check('a second server on the same cluster adds no rows',
+    deduped.jobs.length === snapshot.jobs.length && deduped.nodes.length === snapshot.nodes.length,
+    `${deduped.jobs.length} vs ${snapshot.jobs.length}`);
+  check('the rows that are kept belong to the first server',
+    deduped.jobs.every((j) => j.server === 'metis'));
+  check('and no totals', deduped.summary.all.running.jobs === snapshot.summary.all.running.jobs);
+  check('the second one says whose cluster it is',
+    deduped.servers[1].duplicate_of === 'metis' && !deduped.servers[0].duplicate_of,
+    JSON.stringify(deduped.servers.map((s) => s.duplicate_of)));
+  check('and shows no numbers of its own', deduped.servers[1].counts.jobs === 0);
+  const warned = aggregateState(same);
+  check('the status line explains it',
+    warned.state === 'running' && /hzi.*same Slurm cluster \(bioinf\).*metis/.test(warned.message || ''),
+    JSON.stringify(warned));
+  const ownerDown = [Object.assign({}, same[0], { state: 'error', message: 'ssh: timeout' }), same[1]];
+  const takeover = mergeSnapshots(ownerDown);
+  check('a failing first server hands the cluster to the one still answering',
+    takeover.jobs.every((j) => j.server === 'hzi') && takeover.servers[0].duplicate_of === 'hzi',
+    JSON.stringify(takeover.servers.map((s) => s.duplicate_of)));
+  const unknown = Object.assign({}, snapshot, { cluster: undefined });
+  check('collectors that do not say which cluster are never merged away',
+    mergeSnapshots([
+      { id: 'a', name: 'a', state: 'running', snapshot: unknown },
+      { id: 'b', name: 'b', state: 'running', snapshot: unknown },
+    ]).jobs.length === snapshot.jobs.length * 2);
 
   const alone = mergeSnapshots([{ id: 'default', name: '', state: 'running', snapshot }]);
   check('one server merges to the same shape it came in as',
@@ -470,7 +510,9 @@ async function main() {
  *
  * Both are the local one -- there is no second cluster to test against -- but
  * they are two independent processes merged into one snapshot, which is what
- * the routing and the merge have to survive.
+ * the routing and the merge have to survive. Being the same cluster, they are
+ * also the duplicate case end to end: its rows once, the second server named
+ * as a copy of the first.
  */
 async function checkCluster() {
   console.log('\ncluster of two:');
@@ -491,12 +533,16 @@ async function checkCluster() {
     latest.servers.map((s) => s.name).join(',') === 'alpha,beta', latest.servers.map((s) => s.name).join(','));
   check('every node is tagged with the server it came from',
     latest.nodes.length > 0 && latest.nodes.every((n) => n.server === 'alpha' || n.server === 'beta'));
-  check('the same node name appears once per server',
-    latest.nodes.filter((n) => n.name === latest.nodes[0].name).length === 2,
+  check('one cluster watched twice lists its nodes once, under the first',
+    latest.nodes.filter((n) => n.name === latest.nodes[0].name).length === 1 &&
+      latest.nodes.every((n) => n.server === 'alpha'),
     latest.nodes[0].name);
+  check('and the second is marked as the same cluster',
+    latest.servers[1].duplicate_of === 'alpha', JSON.stringify(latest.servers[1]).slice(0, 120));
 
-  // A click has to reach the collector that knows the row.
-  const node = latest.nodes.find((n) => n.server === 'beta');
+  // A click has to reach the collector that knows the row -- beta's process
+  // still runs, so a lookup sent to it is still answered by it.
+  const node = latest.nodes[0];
   const detail = await cluster.fetchDetail({ server: 'beta', kind: 'node', id: node.name });
   check('a detail lookup is routed to the named server', detail.kind === 'node' && detail.node === node.name);
   let rejected = false;

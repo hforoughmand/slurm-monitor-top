@@ -101,24 +101,99 @@ export function displayName(entry: ServerEntry): string {
   return entry.name || entry.snapshot?.host || entry.id;
 }
 
-function serverView(entry: ServerEntry): ServerView {
-  const snapshot = entry.snapshot;
+/**
+ * What makes two snapshots the same cluster, or '' when it cannot be told.
+ *
+ * Name and controller together: the name alone is whatever the site chose, and
+ * two unrelated sites can both have chosen `cluster`. A collector too old to
+ * report either is never matched -- showing a cluster twice is a nuisance,
+ * hiding a real one because two hostnames happened to agree would be worse.
+ */
+function clusterKey(snapshot: Snapshot): string {
+  const cluster = snapshot.cluster;
+  if (!cluster || !(cluster.name || cluster.controller)) {
+    return '';
+  }
+  return `${cluster.name}@${cluster.controller}`;
+}
+
+/**
+ * Servers that reach a cluster an earlier server already reaches, mapped to
+ * that earlier server's id.
+ *
+ * Two entries end up on one cluster more easily than it sounds: two login
+ * nodes of it, or a list shared between machines in which `here` means a
+ * different machine in every window. Either way every job would be listed
+ * twice, once under each label.
+ *
+ * The first in the list keeps the cluster, unless it is failing: then its rows
+ * are stale and the duplicate, which is still answering, takes over.
+ */
+export function findDuplicates(entries: ServerEntry[]): Map<string, string> {
+  const owners = new Map<string, string>();
+  const duplicates = new Map<string, string>();
+  const ordered = [
+    ...entries.filter((entry) => entry.state !== 'error'),
+    ...entries.filter((entry) => entry.state === 'error'),
+  ];
+  for (const entry of ordered) {
+    const key = entry.snapshot ? clusterKey(entry.snapshot) : '';
+    if (!key) {
+      continue;
+    }
+    const owner = owners.get(key);
+    if (owner) {
+      duplicates.set(entry.id, owner);
+    } else {
+      owners.set(key, entry.id);
+    }
+  }
+  return duplicates;
+}
+
+/** The warning for servers that are another server again, or '' for none. */
+function duplicateMessage(entries: ServerEntry[], duplicates: Map<string, string>): string {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  return [...duplicates]
+    .map(([id, ownerId]) => {
+      const entry = byId.get(id);
+      const owner = byId.get(ownerId);
+      if (!entry || !owner) {
+        return '';
+      }
+      const cluster = entry.snapshot?.cluster?.name;
+      return (
+        `${displayName(entry)} reaches the same Slurm cluster${cluster ? ` (${cluster})` : ''} as ` +
+        `${displayName(owner)}, so its jobs are listed once, under ${displayName(owner)}.`
+      );
+    })
+    .filter(Boolean)
+    .join(' ');
+}
+
+function serverView(entry: ServerEntry, duplicateOf?: string): ServerView {
+  // A duplicate keeps its name and state but none of its numbers: they are
+  // its owner's numbers, and a box showing them again would double-count
+  // just as surely as the merged rows would.
+  const snapshot = duplicateOf ? undefined : entry.snapshot;
   return {
     id: entry.id,
     name: displayName(entry),
-    host: snapshot?.host ?? '',
-    user: snapshot?.user ?? '',
+    host: entry.snapshot?.host ?? '',
+    user: entry.snapshot?.user ?? '',
     state: entry.state,
     message: entry.message,
-    timestamp: snapshot?.timestamp ?? 0,
+    timestamp: entry.snapshot?.timestamp ?? 0,
     gpu: snapshot?.gpu ?? emptyGpuStats(),
     summary: (snapshot?.summary as Record<'all' | 'me' | 'others', SummaryBucket>) ?? emptySummary(),
-    pinned: snapshot?.pinned ?? [],
+    pinned: entry.snapshot?.pinned ?? [],
     counts: {
       jobs: snapshot?.jobs?.length ?? 0,
       nodes: snapshot?.nodes?.length ?? 0,
       disks: snapshot?.disks?.length ?? 0,
     },
+    cluster: entry.snapshot?.cluster?.name || undefined,
+    duplicate_of: duplicateOf,
   };
 }
 
@@ -132,16 +207,20 @@ function serverView(entry: ServerEntry): ServerView {
  *
  * The top-level fields describe the first server, which makes a merged snapshot
  * a drop-in for the single-server one every part of the view used to be handed.
+ *
+ * A server that reaches the same cluster as an earlier one contributes no rows
+ * and no totals; see `findDuplicates`.
  */
 export function mergeSnapshots(entries: ServerEntry[]): MergedSnapshot {
-  const withData = entries.filter((entry) => entry.snapshot);
+  const duplicates = findDuplicates(entries);
+  const withData = entries.filter((entry) => entry.snapshot && !duplicates.has(entry.id));
   const first = withData[0]?.snapshot;
   const merged: MergedSnapshot = {
     schema: first?.schema ?? SUPPORTED_SCHEMA,
     timestamp: Math.max(0, ...withData.map((entry) => entry.snapshot?.timestamp ?? 0)),
     user: first?.user ?? '',
     host: first?.host ?? '',
-    servers: entries.map(serverView),
+    servers: entries.map((entry) => serverView(entry, duplicates.get(entry.id))),
     jobs: [],
     nodes: [],
     disks: [],
@@ -150,7 +229,7 @@ export function mergeSnapshots(entries: ServerEntry[]): MergedSnapshot {
     summary: mergeSummaries(withData.map((entry) => entry.snapshot?.summary)),
   };
 
-  for (const entry of entries) {
+  for (const entry of withData) {
     const snapshot = entry.snapshot;
     if (!snapshot) {
       continue;
@@ -181,19 +260,18 @@ export function aggregateState(entries: ServerEntry[]): { state: ServerState; me
     return { state: 'paused', message: 'No Slurm servers are configured.' };
   }
   const broken = entries.filter((entry) => entry.state === 'error');
+  const duplicated = duplicateMessage(entries, findDuplicates(entries));
   if (broken.length === entries.length) {
     const first = broken[0];
     const label = entries.length > 1 ? `${broken.length} servers are failing. ${displayName(first)}: ` : '';
     return { state: 'error', message: `${label}${first.message ?? 'collector error'}` };
   }
   if (broken.length) {
-    return {
-      state: 'running',
-      message: `${broken.map((entry) => displayName(entry)).join(', ')}: ${broken[0].message ?? 'collector error'}`,
-    };
+    const failing = `${broken.map((entry) => displayName(entry)).join(', ')}: ${broken[0].message ?? 'collector error'}`;
+    return { state: 'running', message: duplicated ? `${failing} ${duplicated}` : failing };
   }
   if (entries.some((entry) => entry.state === 'running')) {
-    return { state: 'running' };
+    return duplicated ? { state: 'running', message: duplicated } : { state: 'running' };
   }
   if (entries.some((entry) => entry.state === 'starting')) {
     return { state: 'starting' };
