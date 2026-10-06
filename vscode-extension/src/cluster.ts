@@ -217,6 +217,11 @@ export class ClusterClient implements vscode.Disposable {
     return this.require(server).fetchJobOutput(jobId, stream, lines);
   }
 
+  /** Seconds between refreshes of one server's details, as its client paces it. */
+  refreshSeconds(server: string | undefined, configured: number): number {
+    return this.require(server).refreshSeconds(configured);
+  }
+
   async togglePin(server: string | undefined, jobId: string): Promise<string[]> {
     return this.require(server).togglePin(jobId);
   }

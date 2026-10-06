@@ -1,6 +1,7 @@
 import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import * as vscode from 'vscode';
 
+import { paceRemote, refreshSeconds } from './pace';
 import { feedStdin, shortArgv } from './remote';
 import { Collector, lastResolutionFailure, resolveCollector } from './resolve';
 import { ServerSpec } from './servers';
@@ -63,6 +64,13 @@ export class SlurmClient implements vscode.Disposable {
     this.log.appendLine(`[${this.label}] ${line}`);
   }
 
+  /** How many seconds apart this server is refreshed: floored when it is remote. */
+  refreshSeconds(configured: number): number {
+    // Before resolution the configured command is the best guess; after, what
+    // actually runs -- an address that turned out to be this machine is local.
+    return refreshSeconds(this.collector?.argv ?? this.spec.command, configured);
+  }
+
   get latest(): Snapshot | undefined {
     return this.lastSnapshot;
   }
@@ -107,22 +115,31 @@ export class SlurmClient implements vscode.Disposable {
       return;
     }
 
-    const interval = vscode.workspace.getConfiguration('slurmTop').get<number>('refreshInterval', 3);
-    const [command, ...args] = this.collector.argv;
+    const collector = this.collector;
+    const interval = refreshSeconds(
+      collector.argv,
+      vscode.workspace.getConfiguration('slurmTop').get<number>('refreshInterval', 3)
+    );
+    const [command, ...args] = collector.argv;
     const argv = [...args, '--watch', String(interval)];
+    await paceRemote(collector.argv, (line) => this.note(line));
+    // Stopped, restarted or started twice while waiting for the turn.
+    if (!this.wanted || this.disposed || this.child || this.collector !== collector) {
+      return;
+    }
     this.note(`spawn: ${shortArgv([command, ...argv])}`);
 
     let child: ChildProcessWithoutNullStreams;
     try {
       child = spawn(command, argv, {
-        env: { ...process.env, ...(this.collector.env ?? {}) },
+        env: { ...process.env, ...(collector.env ?? {}) },
       });
     } catch (err) {
       this.setState('error', `Failed to start collector: ${String(err)}`);
       return;
     }
 
-    feedStdin(child, this.collector.stdin);
+    feedStdin(child, collector.stdin);
     this.child = child;
     this.buffer = '';
     child.stdout.setEncoding('utf8');
@@ -248,6 +265,7 @@ export class SlurmClient implements vscode.Disposable {
     }
     const [command, ...args] = collector.argv;
     const argv = [...args, ...extra];
+    await paceRemote(collector.argv, (line) => this.note(line));
     const stdout = await new Promise<string>((resolve, reject) => {
       const child = execFile(
         command,

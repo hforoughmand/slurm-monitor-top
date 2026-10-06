@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.11.3
+
+### Changed
+
+- **A remote cluster is contacted at most once every 30 seconds.** Each new
+  ssh connection to a host -- a probe while looking for the collector, the
+  stream starting or restarting, a detail lookup, a pin -- waits until 30
+  seconds after the previous one to that host, and the stream over an open
+  connection refreshes every 30 seconds however low `slurmTop.refreshInterval`
+  is; so does an open detail tab. A burst of connections and a `squeue` every
+  3 seconds is what a cluster's monitoring flags. This machine is not paced.
+  The cost is a slower start: a cluster where the collector is only found by
+  the last way tried shows its first numbers after about two minutes. The
+  log says when a call is waiting for its turn.
+
 ## 0.11.2
 
 ### Changed

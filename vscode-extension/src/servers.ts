@@ -111,15 +111,8 @@ const SSH_OPTION_TAKES_VALUE = new Set([
   '-m', '-O', '-o', '-P', '-p', '-Q', '-R', '-S', '-W', '-w',
 ]);
 
-/**
- * Whether an ssh command line says what to run on the far side.
- *
- * `ssh login01` on its own is a login shell, not a collector: appending
- * `--watch 3` to it would send that to ssh, which answers with its usage. So
- * the default remote command is added for it, exactly as it would be for the
- * bare destination `login01`.
- */
-function sshNamesACommand(argv: string[]): boolean {
+/** Where in an ssh argv its destination is: the first word no option swallows. */
+function destinationIndex(argv: string[]): number {
   let at = 1;
   while (at < argv.length && argv[at].startsWith('-')) {
     const option = argv[at];
@@ -132,8 +125,34 @@ function sshNamesACommand(argv: string[]): boolean {
     const last = `-${option.slice(-1)}`;
     at += /^-[A-Za-z0-9]{2,}$/.test(option) && SSH_OPTION_TAKES_VALUE.has(last) ? 2 : 1;
   }
+  return at;
+}
+
+/**
+ * Whether an ssh command line says what to run on the far side.
+ *
+ * `ssh login01` on its own is a login shell, not a collector: appending
+ * `--watch 3` to it would send that to ssh, which answers with its usage. So
+ * the default remote command is added for it, exactly as it would be for the
+ * bare destination `login01`.
+ */
+function sshNamesACommand(argv: string[]): boolean {
   // argv[at] is the destination; anything past it is the remote command.
-  return at + 1 < argv.length;
+  return destinationIndex(argv) + 1 < argv.length;
+}
+
+/**
+ * The machine an argv connects to, or undefined when it runs here.
+ *
+ * Any command that starts with `ssh` -- a bare destination, a jump through
+ * another host, a whole command line -- is another server; a container or a
+ * wrapper is not. `ssh -G` only prints configuration, so it is not either.
+ */
+export function sshDestination(argv: string[]): string | undefined {
+  if (!argv.length || argv[0].split('/').pop() !== 'ssh' || argv.includes('-G')) {
+    return undefined;
+  }
+  return argv[destinationIndex(argv)];
 }
 
 /**

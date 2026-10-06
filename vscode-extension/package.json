@@ -2,7 +2,7 @@
   "name": "slurm-monitor-top",
   "displayName": "Slurm Monitor (slurm-top)",
   "description": "htop-style live view of Slurm jobs, nodes, GPUs and disks, in the sidebar or a full editor tab.",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "license": "MIT",
   "publisher": "hforoughmand",
   "icon": "media/icon.png",
@@ -190,7 +190,7 @@
           "default": 3,
           "minimum": 1,
           "maximum": 600,
-          "description": "Seconds between cluster refreshes."
+          "description": "Seconds between cluster refreshes. A cluster reached over ssh is refreshed, and connected to, at most once every 30 seconds."
         },
         "slurmTop.pauseWhenHidden": {
           "type": "boolean",

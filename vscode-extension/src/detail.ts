@@ -298,8 +298,14 @@ class DetailWindow {
     if (!this.panel.visible) {
       return;
     }
-    const seconds = vscode.workspace.getConfiguration('slurmTop').get<number>('refreshInterval', 3);
-    this.timer = setInterval(() => void this.load(), Math.max(1, seconds) * 1000);
+    const configured = vscode.workspace.getConfiguration('slurmTop').get<number>('refreshInterval', 3);
+    let seconds = Math.max(1, configured);
+    try {
+      seconds = this.client.refreshSeconds(this.target?.server, configured);
+    } catch {
+      // The server was removed from the settings; the next load says so.
+    }
+    this.timer = setInterval(() => void this.load(), seconds * 1000);
   }
 
   dispose(): void {

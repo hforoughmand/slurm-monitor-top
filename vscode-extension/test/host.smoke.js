@@ -372,6 +372,41 @@ async function checkPushedCollector() {
   }
 }
 
+/**
+ * Another machine is contacted at most once per 30 seconds; this one is not
+ * paced at all. Checked without waiting the 30 seconds: what matters is that a
+ * second connection to the same host does not start, while one to another host,
+ * or a local command, does.
+ */
+async function checkPacing() {
+  console.log('\npacing remote calls:');
+  const { sshDestination } = require('../out/servers.js');
+  const { paceRemote, refreshSeconds, REMOTE_GAP_MS } = require('../out/pace.js');
+  const cases = [
+    [['ssh', '-o', 'BatchMode=yes', 'me@login01', 'slurm-top', '--json'], 'me@login01'],
+    [['ssh', '-J', 'jump', 'login03', 'python3', '-'], 'login03'],
+    [['/usr/bin/ssh', '-tt', 'login02'], 'login02'],
+    [['ssh', '-G', 'login01'], undefined],
+    [['python3', '-m', 'slurm_top.export'], undefined],
+    [['docker', 'exec', 'slurm', 'slurm-top', '--json'], undefined],
+  ];
+  for (const [argv, want] of cases) {
+    check(`the destination of ${argv.join(' ')}`, sshDestination(argv) === want, String(sshDestination(argv)));
+  }
+  check('the gap is at least 30 seconds', REMOTE_GAP_MS >= 30000, String(REMOTE_GAP_MS));
+  check('a remote refresh is floored at 30s', refreshSeconds(['ssh', 'login01'], 3) === 30);
+  check('a slower setting is kept', refreshSeconds(['ssh', 'login01'], 60) === 60);
+  check('a local refresh is as configured', refreshSeconds(['python3', '-m', 'slurm_top.export'], 3) === 3);
+
+  const settled = (promise, ms) =>
+    Promise.race([promise.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), ms))]);
+  const host = ['ssh', 'pace-test-a.invalid', 'true'];
+  check('the first call to a host goes at once', await settled(paceRemote(host), 200));
+  check('a second call to it waits its turn', !(await settled(paceRemote(host), 500)));
+  check('another host is not held up by it', await settled(paceRemote(['ssh', 'pace-test-b.invalid']), 200));
+  check('a local command is never paced', await settled(paceRemote(['python3', '-c', 'pass']), 200));
+}
+
 /** The merge layer: two clusters in one snapshot. */
 function checkMerge(snapshot) {
   console.log('\nmerge:');
@@ -457,6 +492,7 @@ async function main() {
   await checkAddServer();
 
   await checkPushedCollector();
+  await checkPacing();
 
   console.log('\nresolver:');
   const collector = await resolveCollector(localSpec(), extensionPath, log);

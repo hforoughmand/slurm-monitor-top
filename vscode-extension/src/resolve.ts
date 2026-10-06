@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
+import { paceRemote } from './pace';
 import { feedStdin, payloadSize, pushedCollector, shellQuote, shortArgv } from './remote';
 import { ServerSpec } from './servers';
 
@@ -102,7 +103,9 @@ export async function isThisMachine(ssh: string[]): Promise<boolean> {
  */
 export async function findInstalledOverSsh(ssh: string[], timeoutMs = 25000): Promise<string | undefined> {
   // `$SHELL` is expanded over there: the shell the user actually logs in with.
-  const out = await capture([...ssh, '"$SHELL"', '-ic', shellQuote('command -v slurm-top')], timeoutMs);
+  const argv = [...ssh, '"$SHELL"', '-ic', shellQuote('command -v slurm-top')];
+  await paceRemote(argv);
+  const out = await capture(argv, timeoutMs);
   // An interactive shell may print a banner; the answer is the last path.
   const paths = out
     .split('\n')
@@ -206,7 +209,13 @@ function lastLines(text: string, count = 3): string {
     .join('; ');
 }
 
-function probe(candidate: Collector, timeoutMs: number): Promise<ProbeResult> {
+async function probe(
+  candidate: Collector,
+  timeoutMs: number,
+  note: (line: string) => void
+): Promise<ProbeResult> {
+  // Waiting for a turn is not the command being slow: the timeout starts after.
+  await paceRemote(candidate.argv, note);
   return new Promise((resolve) => {
     const [command, ...args] = candidate.argv;
     let child;
@@ -301,7 +310,7 @@ export async function resolveCollector(
     if (!candidate) {
       continue;
     }
-    const { ok, reason } = await probe(candidate, timeout);
+    const { ok, reason } = await probe(candidate, timeout, (line) => log.appendLine(`collector: ${line}`));
     if (ok) {
       log.appendLine(`collector: using ${candidate.origin} -> ${shortArgv(candidate.argv)}`);
       return candidate;

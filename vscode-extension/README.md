@@ -151,6 +151,22 @@ answers is used for the rest of the session:
 **Slurm: Show Extension Log** names the one that won, and quotes what the others
 said.
 
+### How often an ssh cluster is contacted
+
+At most once every 30 seconds. A login node sees every connection the extension
+opens and every `squeue` it runs, and a burst of them reads as a script
+hammering the node — so each new ssh connection to a host waits until 30
+seconds after the previous one, and the collector streaming over an open
+connection refreshes every 30 seconds however low `slurmTop.refreshInterval`
+is (a higher setting is kept). This machine is not paced, even when it is
+written as an address.
+
+The price is a slower start: the ways of running the collector above are tried
+one connection at a time, so a cluster where only the last of them works shows
+its first numbers after a couple of minutes. A detail lookup that comes within
+30 seconds of another connection waits for its turn too.
+**Slurm: Show Extension Log** says when a call is waiting.
+
 What is still needed is a login that does not ask for anything: a bare
 destination is reached with `ssh -o BatchMode=yes`, so a passphrase-locked key
 fails immediately rather than hanging on a prompt no one can answer. Use an
@@ -334,7 +350,7 @@ command says so rather than failing if the package is missing.
 |---|---|---|
 | `slurmTop.servers` | one row for this machine | The clusters to watch, as name → where: `here`, an ssh destination, or a whole command line. |
 | `slurmTop.mergeServers` | tables merged, summary per server | Per section, whether several servers share one panel or get one each. |
-| `slurmTop.refreshInterval` | `3` | Seconds between refreshes. |
+| `slurmTop.refreshInterval` | `3` | Seconds between refreshes. A cluster reached over ssh is refreshed at most every 30. |
 | `slurmTop.pythonPath` | `""` | Interpreter for the collector. Empty tries `python3`, then `python`. Ignored once `slurmTop.servers` has anything in it. |
 | `slurmTop.command` | `[]` | Full argv that emits slurm-top JSON, for unusual setups — for example `["ssh", "login01", "slurm-top", "--json"]`. Data-mode flags are appended. Ignored once `slurmTop.servers` has anything in it. |
 | `slurmTop.pauseWhenHidden` | `true` | Stop polling while no Slurm view is on screen. |
