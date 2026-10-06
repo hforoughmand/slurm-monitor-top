@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.1
+
+### Fixed
+
+- **The `this machine` row can be removed.** VS Code merges an object setting
+  with its default, so `slurmTop.servers` always carried `this machine: here`
+  on top of whatever was written -- removing it did nothing, and a list that
+  named this machine by its address watched it twice. The list is now read from
+  the most specific scope that sets it (folder, workspace, then user), and the
+  default row is used only when none does.
+
 ## 0.11.0
 
 ### Added

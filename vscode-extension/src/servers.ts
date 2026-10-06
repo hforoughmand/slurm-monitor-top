@@ -203,12 +203,21 @@ function uniqueId(base: string, taken: Set<string>): string {
 /**
  * The raw setting: what the settings grid shows, in the order it holds it.
  *
- * Falls back to the default row here rather than relying on VS Code to supply
- * the manifest default, so that the list is the same one thing everywhere --
- * including in the tests, which have no manifest.
+ * Read with `inspect` rather than `get`: VS Code merges an object setting with
+ * its default, so `get` always carried the manifest's `this machine: here`
+ * along with whatever the user wrote. That row could not be removed, and in a
+ * list naming this machine by its address it watched the same cluster twice.
+ *
+ * The most specific scope that sets the list wins outright -- the same scope
+ * the server commands write to -- and the default row is used only when no
+ * scope sets anything. Supplied here rather than by VS Code, so the list is the
+ * same one thing everywhere, including in the tests, which have no manifest.
  */
 export function readServerSettings(): Record<string, string> {
-  const value = vscode.workspace.getConfiguration('slurmTop').get<Record<string, string>>('servers', {});
+  const inspected = vscode.workspace
+    .getConfiguration('slurmTop')
+    .inspect<Record<string, string>>('servers');
+  const value = inspected?.workspaceFolderValue ?? inspected?.workspaceValue ?? inspected?.globalValue;
   const configured = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   return Object.keys(configured).some((name) => name.trim()) ? configured : { ...DEFAULT_SERVERS };
 }

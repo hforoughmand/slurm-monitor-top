@@ -38,6 +38,8 @@ const answers = [];
 const asked = [];
 const informed = [];
 const written = [];
+/** What a workspace's own settings.json says, over the user's. */
+let workspaceSettings = {};
 
 function answer(prompt) {
   asked.push(prompt);
@@ -50,8 +52,18 @@ const vscodeStub = {
   ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   workspace: {
     getConfiguration: () => ({
-      get: (key, fallback) => (key in settings ? settings[key] : fallback),
-      inspect: () => ({ globalValue: settings.servers }),
+      // As VS Code does it: an object setting comes back merged with its
+      // manifest default, which is why the server list must not be read
+      // with `get`.
+      get: (key, fallback) =>
+        key === 'servers'
+          ? Object.assign({ 'this machine': 'here' }, settings.servers || {})
+          : key in settings ? settings[key] : fallback,
+      inspect: (key) => ({
+        defaultValue: key === 'servers' ? { 'this machine': 'here' } : undefined,
+        globalValue: settings[key],
+        workspaceValue: workspaceSettings[key],
+      }),
       update: (key, value, target) => {
         written.push({ key, value, target });
         settings[key] = value;
@@ -180,6 +192,18 @@ function checkServerSettings() {
 
   settings = { servers: { '  ': 'me@login01', real: 'me@login02' } };
   check('a nameless row is ignored', readServers().length === 1);
+
+  // VS Code merges an object setting with its default; the default row must
+  // not ride along with a list that left it out.
+  settings = { servers: { metis: 'me@metis.example', hzi: 'me@login01.example' } };
+  check('a list without the default row stays without it',
+    readServers().map((spec) => spec.id).join(',') === 'metis,hzi',
+    readServers().map((spec) => spec.id).join(','));
+  workspaceSettings = { servers: { only: 'here' } };
+  check("a workspace's own list replaces the user's",
+    readServers().map((spec) => spec.id).join(',') === 'only',
+    readServers().map((spec) => spec.id).join(','));
+  workspaceSettings = {};
 
   console.log('\naddresses:');
   const addresses = [
