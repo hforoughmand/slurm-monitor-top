@@ -104,7 +104,7 @@ const { readServers, readMergeSettings } = require('../out/servers.js');
 const { mergeSnapshots, aggregateState } = require('../out/merge.js');
 const { ClusterClient } = require('../out/cluster.js');
 const { addServer } = require('../out/serverui.js');
-const { pushedCollector, shellQuote, shortArgv } = require('../out/remote.js');
+const { feedStdin, pushedCollector, shellQuote, shortArgv } = require('../out/remote.js');
 const { splitCommand, commandFor } = require('../out/servers.js');
 
 const extensionPath = path.join(__dirname, '..');
@@ -296,23 +296,34 @@ async function checkAddServer() {
 async function checkPushedCollector() {
   console.log('\nsending the collector over ssh:');
   const prefix = ['ssh', '-o', 'BatchMode=yes', 'localhost'];
-  const argv = pushedCollector(prefix, extensionPath, 'python3');
+  const pushed = pushedCollector(prefix, extensionPath, 'python3');
   check('a command is built from the bundled copy',
-    Array.isArray(argv) && argv.slice(0, 6).join(' ') === `${prefix.join(' ')} python3 -c`,
-    JSON.stringify(argv && argv.slice(0, 6)));
-  if (!argv) {
+    !!pushed && pushed.argv.join(' ') === `${prefix.join(' ')} python3 -`,
+    JSON.stringify(pushed && pushed.argv));
+  if (!pushed) {
     return;
   }
-  // Two arguments, both quoted for the shell on the far side: the program, and
-  // the modules it rebuilds itself from. Nothing is written over there.
-  check('the whole collector rides in one argument',
-    argv.length === 8 && argv[7].length > 1000, `${argv.length} args, payload ${argv[7]?.length}`);
-  check('both are quoted for the remote shell',
-    argv[6].startsWith("'") && argv[6].endsWith("'") && argv[7].startsWith("'"));
-  check('a log line does not carry the payload',
-    shortArgv(argv).length < 200 && shortArgv(argv).includes('<'), shortArgv(argv));
+  const { argv, stdin } = pushed;
+  // The source goes in as itself, readable by anyone watching the far side:
+  // nothing compressed, encoded or exec'd, and nothing in the process list.
+  check('the collector is sent as its own plain source',
+    stdin.includes('def snapshot(') && stdin.includes('def main(') && !/\bexec\(|b64decode|zlib/.test(stdin),
+    `${stdin.length} bytes`);
+  check('one script, with no package left to import from',
+    !/^\s*from \./m.test(stdin) && stdin.includes('if __name__ == "__main__":'));
+  check('the command line stays short', argv.every((arg) => arg.length < 60), shortArgv(argv));
+  check('a long argument is elided in the log',
+    shortArgv(['python3', '-c', 'x'.repeat(500)]) === 'python3 -c <500 bytes>');
   // The POSIX way of getting a quote inside single quotes: close, escape, reopen.
   check('shell quoting survives a quote', shellQuote("it's") === "'it'\\''s'", shellQuote("it's"));
+
+  // A child that dies before reading must not take the host down with an
+  // unhandled EPIPE on its stdin.
+  const died = await new Promise((resolve) => {
+    const child = execFile('/no/such/command', [], () => resolve(true));
+    feedStdin(child, stdin);
+  });
+  check('a child that never reads its stdin is survived', died);
 
   const reachable = await new Promise((resolve) => {
     execFile('ssh', [...prefix.slice(1), 'true'], { timeout: 20000 }, (err) => resolve(!err));
@@ -324,15 +335,17 @@ async function checkPushedCollector() {
 
   // A real ssh round trip, so a dropped connection is the network's fault and
   // not the collector's: sshd here closes a session now and again. Retried
-  // rather than ignored, so a payload that genuinely cannot run still fails.
+  // rather than ignored, so a copy that genuinely cannot run still fails.
   const attempt = () =>
     new Promise((resolve) => {
-      execFile(argv[0], argv.slice(1), { timeout: 120000, maxBuffer: 64 * 1024 * 1024 }, (err, out, errOut) =>
-        // The command is 26KB of payload, so what the far side *said* has to be
-        // kept apart from it -- appending the two and truncating loses it.
-        resolve({ json: err ? null : out, stderr: String(errOut || ''),
-          why: err ? `${String(errOut || '').slice(0, 160)} | ${err.message.slice(0, 120)}` : '' })
+      const child = execFile(argv[0], argv.slice(1), { timeout: 120000, maxBuffer: 64 * 1024 * 1024 },
+        (err, out, errOut) =>
+          // What the far side *said* is kept apart from the error message, which
+          // repeats the command -- appending the two and truncating loses it.
+          resolve({ json: err ? null : out, stderr: String(errOut || ''),
+            why: err ? `${String(errOut || '').slice(0, 160)} | ${err.message.slice(0, 120)}` : '' })
       );
+      feedStdin(child, stdin);
     });
   const dropped = (text) => /closed by remote host|connection reset|broken pipe/i.test(text);
   let { json, why, stderr } = await attempt();

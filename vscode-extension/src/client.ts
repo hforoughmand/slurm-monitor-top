@@ -1,7 +1,7 @@
 import { ChildProcessWithoutNullStreams, execFile, spawn } from 'child_process';
 import * as vscode from 'vscode';
 
-import { shortArgv } from './remote';
+import { feedStdin, shortArgv } from './remote';
 import { Collector, lastResolutionFailure, resolveCollector } from './resolve';
 import { ServerSpec } from './servers';
 import { JobDetail, JobOutput, NodeDetail, Snapshot, SUPPORTED_SCHEMA } from './types';
@@ -122,6 +122,7 @@ export class SlurmClient implements vscode.Disposable {
       return;
     }
 
+    feedStdin(child, this.collector.stdin);
     this.child = child;
     this.buffer = '';
     child.stdout.setEncoding('utf8');
@@ -248,12 +249,13 @@ export class SlurmClient implements vscode.Disposable {
     const [command, ...args] = collector.argv;
     const argv = [...args, ...extra];
     const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
+      const child = execFile(
         command,
         argv,
         { env: { ...process.env, ...(collector.env ?? {}) }, timeout, maxBuffer: 16 * 1024 * 1024 },
         (err, out) => (err ? reject(err) : resolve(out))
       );
+      feedStdin(child, collector.stdin);
     });
     return JSON.parse(stdout);
   }

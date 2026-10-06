@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.2
+
+### Changed
+
+- **The collector sent to a cluster is plain source on stdin.** It used to go
+  as one 26KB argument -- the modules compressed and base64'd, unpacked by
+  `exec` in `python3 -c` -- which is what security tooling on a cluster flags,
+  and which filled the process list with the blob. The two modules are now
+  joined into one readable script and piped into `python3 -`: `ps` shows
+  `python3 -`, and what runs is the same source as in the repository. Still
+  nothing written to the far side.
+
 ## 0.11.1
 
 ### Fixed

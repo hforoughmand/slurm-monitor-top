@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
-import { payloadSize, pushedCollector, shellQuote, shortArgv } from './remote';
+import { feedStdin, payloadSize, pushedCollector, shellQuote, shortArgv } from './remote';
 import { ServerSpec } from './servers';
 
 /** An argv prefix that prints slurm-top JSON when data-mode flags are appended. */
@@ -12,6 +12,8 @@ export interface Collector {
   argv: string[];
   /** Extra environment the command needs (PYTHONPATH for the bundled copy). */
   env?: Record<string, string>;
+  /** Written to the command's stdin on every start: the source of a sent copy. */
+  stdin?: string;
   /** Human-readable origin, for the log and error messages. */
   origin: string;
 }
@@ -94,7 +96,7 @@ export async function isThisMachine(ssh: string[]): Promise<boolean> {
  * ssh runs a command in a non-interactive shell, and that is exactly the
  * shell conda's `.bashrc` block and most `PATH` edits are skipped in. So a
  * collector that is installed, and that the user runs every day, is still not
- * found -- and the bundled copy gets sent instead, which costs a 26KB payload
+ * found -- and the bundled copy gets sent instead, which costs 26KB of source
  * on every start and which some machines cut off. An interactive shell is asked
  * once, and the collector is then run by its full path, with no shell setup.
  */
@@ -122,7 +124,7 @@ function candidates(spec: ServerSpec, extensionPath: string): Candidate[] {
   if (spec.ssh) {
     // An address that named a machine rather than a command: try the collector
     // it may have, then the module it may have, and failing both send it one.
-    // Ordered by what each costs -- an installed collector needs no payload,
+    // Ordered by what each costs -- an installed collector needs no source sent,
     // and the pushed copy needs nothing of the cluster at all.
     const where = spec.ssh[spec.ssh.length - 1];
     const ssh = spec.ssh;
@@ -143,13 +145,13 @@ function candidates(spec: ServerSpec, extensionPath: string): Candidate[] {
       },
     ];
     for (const interpreter of ['python3', 'python']) {
-      const argv = pushedCollector(spec.ssh, extensionPath, interpreter);
-      if (argv) {
+      const pushed = pushedCollector(spec.ssh, extensionPath, interpreter);
+      if (pushed) {
         list.push({
-          argv,
+          ...pushed,
           origin:
             `the copy bundled in the extension, sent to ${where} for ${interpreter} ` +
-            `(${payloadSize(extensionPath)} bytes, nothing installed there)`,
+            `(${payloadSize(extensionPath)} bytes of plain source on stdin, nothing installed there)`,
         });
       }
     }
@@ -235,6 +237,7 @@ function probe(candidate: Collector, timeoutMs: number): Promise<ProbeResult> {
       timeoutMs
     );
     child.on('error', (err) => finish({ ok: false, reason: String(err) }));
+    feedStdin(child, candidate.stdin);
     child.on('close', (code) => {
       if (code === 0 && output.includes(HELP_MARKER)) {
         finish({ ok: true });

@@ -130,9 +130,11 @@ and controller, which is how they are told apart.
 ### What an ssh server needs
 
 Only ssh and a Python. The extension carries its own copy of the collector, so
-if the cluster has not got slurm-monitor-top installed, the two modules are
-compressed, handed to the remote `python3` as an argument and rebuilt in memory
-there. Nothing is written to that machine and nothing is left behind — and
+if the cluster has not got slurm-monitor-top installed, its source is piped, as
+plain readable Python, into `python3 -` there: the process list shows
+`python3 -`, and what runs is the same source as in this repository — nothing
+compressed, encoded or `exec`'d. Nothing is written to that machine and nothing
+is left behind — and
 `squeue`, `sinfo` and `scontrol` are read by the same parsers as everywhere
 else, so the numbers cannot drift between clusters.
 
@@ -144,10 +146,10 @@ answers is used for the rest of the session:
 | `slurm-top --json` | it is installed there and on the `PATH` of a non-interactive login |
 | `python3 -m slurm_top.export` | the package is importable but its script is not on `PATH` — what `pip install --user` leaves you with |
 | `slurm-top` by its full path | it is installed, but only an interactive shell finds it — a conda environment set up in `.bashrc`. Your login shell is asked once where it is |
-| the copy from here, sent over | nothing at all is installed there; 26KB of argument per connection |
+| the copy from here, sent over | nothing at all is installed there; 66KB of plain source on stdin per connection |
 
 **Slurm: Show Extension Log** names the one that won, and quotes what the others
-said. The payloads are elided there, so a log line stays a line.
+said.
 
 What is still needed is a login that does not ask for anything: a bare
 destination is reached with `ssh -o BatchMode=yes`, so a passphrase-locked key

@@ -250,8 +250,8 @@ The editor view can watch **several clusters at once**, which the terminal UI
 does not: `slurmTop.servers` is a name → where grid you fill in from VS Code's
 settings editor — `here`, an ssh destination, or a command of your own — with
 one collector process per cluster. A cluster reached over ssh needs nothing
-installed on it: the extension sends its own copy of the collector, runs it in
-memory there and reads the JSON back. Their jobs, machines, GPUs and
+installed on it: the extension pipes its own copy of the collector, as plain
+Python source, into `python3 -` there and reads the JSON back. Their jobs, machines, GPUs and
 disks arrive in one set of tables, each row tagged with the cluster it came
 from, with a server filter beside the owner and state ones — or, section by
 section, one panel per cluster instead.

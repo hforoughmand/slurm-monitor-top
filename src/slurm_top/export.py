@@ -9,8 +9,12 @@ Two modes:
 
 * one-shot  -- ``slurm-top --json`` prints a single snapshot object.
 * streaming -- ``slurm-top --json --watch 3`` prints one snapshot per line
-  (newline-delimited JSON) every 3 seconds until stdin closes or the process is
-  killed. The extension uses this so a refresh costs no interpreter startup.
+  (newline-delimited JSON) every 3 seconds until the process is killed. The
+  extension uses this so a refresh costs no interpreter startup.
+
+stdin is never read: on a cluster without the package, the extension pipes this
+module's own source into ``python3 -``, so stdin is at its end before
+:func:`main` runs.
 """
 
 import argparse
