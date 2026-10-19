@@ -655,7 +655,20 @@ def check_tui():
     asyncio.run(drive())
 
 
+def check_job_names_with_pipes():
+    print("squeue parsing:")
+    from slurm_top.data import _job_from_line
+
+    line = "7|alice|PENDING|cpu|nf-head (esm2|perm52)|1|4|32G|cpu=4,mem=32G,node=1|0:00|"
+    job = _job_from_line(line)
+    check("a job name containing '|' is kept whole", bool(job) and job.name == "nf-head (esm2|perm52)")
+    check("and the columns after it are not shifted",
+          bool(job) and (job.nodes, job.ncpus, job.mem, job.node_list) == ("1", "4", "32G", ""))
+    check("a line with too few fields is still refused", _job_from_line("1|a|R") is None)
+
+
 if __name__ == "__main__":
+    check_job_names_with_pipes()
     check_data_layer_is_standalone()
     check_cpu_and_pins()
     check_usage_and_output()

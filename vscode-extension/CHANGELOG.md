@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.12.1
+
+### Fixed
+
+- **Jobs whose name contains a `|` were dropped from every list.** The
+  collector reads `squeue` as `|`-separated fields and discarded any line with
+  an extra one, so names like `nf-head (esm2|perm52)` made the job vanish: on
+  a cluster running a few hundred such Nextflow tasks, nine in ten jobs were
+  missing, and with them your share on the node bars. The name is now whatever
+  lies between the fixed columns on either side.
+
 ## 0.12.0
 
 ### Added

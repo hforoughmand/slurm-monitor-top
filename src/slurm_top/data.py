@@ -160,20 +160,24 @@ _SQUEUE_FORMAT = (
 
 def _job_from_line(line: str) -> Optional[Job]:
     parts = [p.strip() for p in line.split("|")]
-    if len(parts) != 11:
+    # A job name may itself contain "|" (Nextflow names like `task (a|perm52)`),
+    # which adds fields. Every other column is fixed, so read four from the
+    # front and six from the back and call whatever is left the name.
+    if len(parts) < 11:
         return None
+    head, name, tail = parts[:4], "|".join(parts[4:-6]), parts[-6:]
     return Job(
-        job_id=parts[0],
-        user=parts[1],
-        state=parts[2],
-        partition=parts[3],
-        name=parts[4],
-        nodes=parts[5],
-        ncpus=parts[6],
-        mem=parts[7],
-        gpus=parts[8],
-        time_used=parts[9],
-        node_list=parts[10],
+        job_id=head[0],
+        user=head[1],
+        state=head[2],
+        partition=head[3],
+        name=name,
+        nodes=tail[0],
+        ncpus=tail[1],
+        mem=tail[2],
+        gpus=tail[3],
+        time_used=tail[4],
+        node_list=tail[5],
     )
 
 
