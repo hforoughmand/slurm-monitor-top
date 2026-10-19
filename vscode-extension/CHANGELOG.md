@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.0
+
+### Added
+
+- **Your jobs stand out in the task list.** Rows for jobs you own have a
+  tinted background, bolder text and a thicker accent edge.
+- **Your share of each machine, drawn on its bars.** On the CPU A/T and
+  MEM FREE bars of the Nodes table, and the GPU U/T and MEM FREE bars of the
+  GPUs table, the part held by your running jobs is shown in purple over the
+  start of the used part; hover a cell for the amount. GPU U/T in the Nodes
+  table is now a bar as well. A job on several nodes is split evenly between
+  them, since Slurm reports only its totals.
+
 ## 0.11.3
 
 ### Changed

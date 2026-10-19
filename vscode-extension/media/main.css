@@ -303,8 +303,24 @@ tbody tr.selected {
   color: var(--vscode-list-activeSelectionForeground);
 }
 
+/* Our own jobs: a tinted row, an accent edge and heavier text, so they pick
+   themselves out of a long queue without hiding the state colours. */
+tbody tr.mine {
+  background: color-mix(in srgb, var(--vscode-textLink-foreground) 14%, transparent);
+  font-weight: 600;
+}
+
 tbody tr.mine td:first-child {
-  box-shadow: inset 2px 0 0 var(--vscode-textLink-foreground);
+  box-shadow: inset 3px 0 0 var(--vscode-textLink-foreground);
+}
+
+tbody tr.mine:hover {
+  background: color-mix(in srgb, var(--vscode-textLink-foreground) 24%, transparent);
+}
+
+/* Selection has to win over the tint. */
+tbody tr.mine.selected {
+  background: var(--vscode-list-activeSelectionBackground);
 }
 
 .empty {
@@ -345,6 +361,12 @@ tbody tr.selected .state-other {
   inset: 0 auto 0 0;
   border-radius: 2px;
   background: var(--vscode-charts-blue, #3794ff);
+}
+
+/* Our share of what is in use, over the start of the used part. */
+.bar > .fill.mine {
+  background: var(--vscode-charts-purple, #b180d7);
+  border-right: 1px solid var(--vscode-editor-background);
 }
 
 .bar.warn > .fill { background: var(--vscode-charts-yellow, #d6a72c); }

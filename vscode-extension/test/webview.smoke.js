@@ -665,11 +665,31 @@ function runColumnSettings() {
     String(window.document.querySelectorAll("[data-section='nodes'] tbody tr").length));
 }
 
+/** Our own jobs are picked out of the queue, and our share is drawn on the machines. */
+function runMine() {
+  console.log('\nownership:');
+  const { window, send } = makeWindow('dashboard');
+  const sections = ['jobs', 'nodes', 'gpus'];
+  send({ type: 'config', sections, ownerFilter: 'all', interval: 3, detailsIn: 'overlay' });
+  send({ type: 'snapshot', snapshot });
+  const doc = window.document;
+  const mineRows = Array.from(doc.querySelectorAll("[data-section='jobs'] tbody tr.mine"));
+  const mineJobs = snapshot.jobs.filter((j) => j.user === snapshot.user);
+  check('only the user\'s jobs are highlighted', mineRows.length === mineJobs.length, `${mineRows.length} vs ${mineJobs.length}`);
+  const nodeRow = (name) => doc.querySelector(`[data-section='nodes'] tbody tr[data-id='${name}']`);
+  // alice runs 16 of gpu01's cores; bob's two-node job on cpu[01-02] is not hers.
+  check('a node holding the user\'s job shows their share', !!nodeRow('gpu01').querySelector('.fill.mine'));
+  check('a node holding only others\' jobs shows none', !nodeRow('cpu01').querySelector('.fill.mine'));
+  const gpuBar = doc.querySelector("[data-section='gpus'] tbody tr[data-id='gpu01/a100'] .fill.mine");
+  check('the GPU table marks it too', !!gpuBar);
+}
+
 run('dashboard', ['summary', 'jobs', 'nodes', 'gpus', 'disks'], 'overlay');
 run('sidebar', ['summary', 'jobs', 'nodes', 'gpus', 'disks'], 'popup');
 runColumnSettings();
 runDetailWindow();
 runModal();
+runMine();
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

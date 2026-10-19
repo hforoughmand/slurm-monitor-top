@@ -298,6 +298,10 @@
       value: (n) => `${n.cpus_alloc_n}/${n.cpus_total_n}`,
       sort: (n) => n.cpus_alloc_n,
       bar: (n) => (n.cpus_total_n ? n.cpus_alloc_n / n.cpus_total_n : 0),
+      mine: (n) => {
+        const own = mineOn(n);
+        return own && n.cpus_total_n ? { fraction: own.cpus / n.cpus_total_n, text: `${Math.round(own.cpus)} CPUs` } : null;
+      },
     },
     // Free cores are half the question "can I land a job here", so this one
     // survives into the narrow view alongside free memory.
@@ -320,6 +324,10 @@
       value: (n) => n.mem_free_human,
       sort: (n) => n.mem_free_mb,
       bar: (n) => (n.mem_total_mb ? 1 - n.mem_free_mb / n.mem_total_mb : 0),
+      mine: (n) => {
+        const own = mineOn(n);
+        return own && n.mem_total_mb ? { fraction: own.mem_mb / n.mem_total_mb, text: formatMb(own.mem_mb) } : null;
+      },
     },
     {
       key: 'mem_used',
@@ -335,6 +343,11 @@
       numeric: true,
       value: (n) => (n.gpu_total ? `${n.gpu_used}/${n.gpu_total}` : '-'),
       sort: (n) => n.gpu_free,
+      bar: (n) => (n.gpu_total ? n.gpu_used / n.gpu_total : 0),
+      mine: (n) => {
+        const own = mineOn(n);
+        return own && own.gpus && n.gpu_total ? { fraction: own.gpus / n.gpu_total, text: `${Math.round(own.gpus)} GPU` } : null;
+      },
       cls: (n) => (n.gpu_total && n.gpu_free > 0 ? 'state-running' : 'state-other'),
     },
     {
@@ -415,6 +428,11 @@
       value: (g) => `${g.used}/${g.total}`,
       sort: (g) => g.used,
       bar: (g) => (g.total ? g.used / g.total : 0),
+      mine: (g) => {
+        const own = mineOn(g);
+        const count = own ? own.types[g.type] || 0 : 0;
+        return count && g.total ? { fraction: count / g.total, text: `${Math.round(count)} GPU` } : null;
+      },
     },
     {
       key: 'free',
@@ -430,6 +448,10 @@
       value: (g) => g.mem_free_human,
       sort: (g) => g.mem_free_mb,
       bar: (g) => (g.mem_total_mb ? 1 - g.mem_free_mb / g.mem_total_mb : 0),
+      mine: (g) => {
+        const own = mineOn(g);
+        return own && g.mem_total_mb ? { fraction: own.mem_mb / g.mem_total_mb, text: formatMb(own.mem_mb) } : null;
+      },
     },
     { key: 'cpus_idle', label: 'CPU IDLE', numeric: true, value: (g) => g.cpus_idle_n },
     {
@@ -790,6 +812,81 @@
     return `${manyServers() ? 'many' : 'one'}:${plan.map((entry) => entry.key).join('|')}:${columns}`;
   }
 
+  /** `gpu[01-03,07],cpu05` -> every host name. Bracket ranges keep their zero padding. */
+  function expandHosts(list) {
+    const out = [];
+    const text = String(list || '');
+    let depth = 0;
+    let start = 0;
+    const parts = [];
+    for (let i = 0; i <= text.length; i++) {
+      const ch = text[i];
+      if (ch === '[') depth++;
+      else if (ch === ']') depth--;
+      else if ((ch === ',' && depth === 0) || i === text.length) {
+        parts.push(text.slice(start, i));
+        start = i + 1;
+      }
+    }
+    for (const part of parts) {
+      const m = /^(.*?)\[([^\]]*)\](.*)$/.exec(part);
+      if (!m) {
+        if (part) out.push(part);
+        continue;
+      }
+      for (const range of m[2].split(',')) {
+        const [lo, hi] = range.split('-');
+        if (hi === undefined) {
+          out.push(m[1] + lo + m[3]);
+          continue;
+        }
+        const width = lo.length;
+        for (let n = Number(lo); n <= Number(hi); n++) {
+          out.push(m[1] + String(n).padStart(width, '0') + m[3]);
+        }
+      }
+    }
+    return out;
+  }
+
+  let mineCache = { snapshot: null, map: new Map() };
+
+  /**
+   * What the signed-in user's running jobs hold on each machine, keyed
+   * `server|node`. Slurm reports a job's totals, not its share of each node,
+   * so a job on several nodes is split evenly -- exact for the usual
+   * homogeneous request, close otherwise.
+   */
+  function mineByNode() {
+    if (mineCache.snapshot === state.snapshot) return mineCache.map;
+    const map = new Map();
+    for (const job of (state.snapshot && state.snapshot.jobs) || []) {
+      if (job.user !== userOn(serverOf(job)) || !/^R/i.test(String(job.state))) continue;
+      const hosts = expandHosts(job.node_list);
+      if (!hosts.length) continue;
+      const cpus = (Number(job.cpu_count) || 0) / hosts.length;
+      // --mem-per-cpu comes back with a trailing "c": a per-core figure.
+      const mem = (Number(job.mem_mb) || 0) * (/c$/i.test(String(job.mem)) ? cpus : 1);
+      for (const host of hosts) {
+        const key = `${serverOf(job)}|${host}`;
+        const entry = map.get(key) || { cpus: 0, mem_mb: 0, gpus: 0, types: {} };
+        entry.cpus += cpus;
+        entry.mem_mb += mem;
+        entry.gpus += (Number(job.gpu_count) || 0) / hosts.length;
+        for (const [type, count] of Object.entries(job.gpu_types || {})) {
+          entry.types[type] = (entry.types[type] || 0) + count / hosts.length;
+        }
+        map.set(key, entry);
+      }
+    }
+    mineCache = { snapshot: state.snapshot, map };
+    return map;
+  }
+
+  function mineOn(row) {
+    return mineByNode().get(`${serverOf(row)}|${row.name || row.node}`) || null;
+  }
+
   /**
    * A bar, with room for its own number.
    *
@@ -802,11 +899,24 @@
     return el('span', { class: 'bar' }, [el('span', { class: 'fill' })]);
   }
 
-  function setBar(node, fraction) {
+  function setBar(node, fraction, mine) {
     const pct = Math.max(0, Math.min(1, Number(fraction) || 0));
     node.className = pct >= 0.9 ? 'bar high' : pct >= 0.7 ? 'bar warn' : 'bar';
     const fill = node.querySelector('.fill') || node.firstChild;
     /** @type {HTMLElement} */ (fill).style.width = (pct * 100).toFixed(1) + '%';
+    // Our share is drawn over the start of the used part, so it can never
+    // outgrow it.
+    let own = node.querySelector('.fill.mine');
+    const share = Math.max(0, Math.min(pct, Number(mine) || 0));
+    if (share > 0) {
+      if (!own) {
+        own = el('span', { class: 'fill mine' });
+        fill.after(own);
+      }
+      own.style.width = (share * 100).toFixed(1) + '%';
+    } else if (own) {
+      own.remove();
+    }
   }
 
   function makePanel(entry, title, controls, body) {
@@ -1335,7 +1445,11 @@
       }
       const wanted = tooltip || value;
       if (cell.td.title !== wanted) cell.td.title = wanted;
-      if (cell.barNode) setBar(cell.barNode, cell.column.bar(row));
+      if (cell.barNode) {
+        const own = cell.column.mine ? cell.column.mine(row) : null;
+        setBar(cell.barNode, cell.column.bar(row), own ? own.fraction : 0);
+        if (own && own.fraction > 0) cell.td.title = `${wanted} (yours: ${own.text})`;
+      }
       const extra = cell.column.cls ? cell.column.cls(row) : '';
       const base = [cell.column.numeric ? 'numeric' : '', cell.barNode ? 'with-bar' : '', extra].filter(Boolean).join(' ');
       if (cell.td.className !== base) cell.td.className = base;
