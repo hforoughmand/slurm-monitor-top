@@ -363,14 +363,18 @@ tbody tr.selected .state-other {
   background: var(--vscode-charts-blue, #3794ff);
 }
 
-/* Our share of what is in use, over the start of the used part. */
-.bar > .fill.mine {
+.bar.warn > .fill { background: var(--vscode-charts-yellow, #d6a72c); }
+.bar.high > .fill { background: var(--vscode-charts-red, #f14c4c); }
+
+/* Our share of what is in use, over the start of the used part. It has to
+   come after the warn and high colours and match their specificity, or a
+   nearly full bar paints the whole thing red and the share disappears. */
+.bar > .fill.mine,
+.bar.warn > .fill.mine,
+.bar.high > .fill.mine {
   background: var(--vscode-charts-purple, #b180d7);
   border-right: 1px solid var(--vscode-editor-background);
 }
-
-.bar.warn > .fill { background: var(--vscode-charts-yellow, #d6a72c); }
-.bar.high > .fill { background: var(--vscode-charts-red, #f14c4c); }
 
 /* A bar cell has to stay a real table cell. `display: flex` overrides
    `display: table-cell`, so the browser wraps the cell in an anonymous one and

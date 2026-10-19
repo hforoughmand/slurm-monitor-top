@@ -682,6 +682,12 @@ function runMine() {
   check('a node holding only others\' jobs shows none', !nodeRow('cpu01').querySelector('.fill.mine'));
   const gpuBar = doc.querySelector("[data-section='gpus'] tbody tr[data-id='gpu01/a100'] .fill.mine");
   check('the GPU table marks it too', !!gpuBar);
+  // jsdom does not cascade, so guard the bug that hid it: a nearly full bar is
+  // red, and the share has to be declared after that to stay purple.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'media', 'main.css'), 'utf8');
+  check('our share is declared after the red and yellow bar colours',
+    css.indexOf('.bar.high > .fill.mine') > css.indexOf('.bar.high > .fill {')
+      && css.indexOf('.bar.warn > .fill.mine') > css.indexOf('.bar.warn > .fill {'));
 }
 
 run('dashboard', ['summary', 'jobs', 'nodes', 'gpus', 'disks'], 'overlay');

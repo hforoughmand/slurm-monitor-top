@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.2
+
+### Fixed
+
+- **Your share was invisible on a nearly full bar.** The red used above 90%
+  (and yellow above 70%) was painted over the purple, so on a machine that was
+  full -- exactly where you want to see whose jobs fill it -- the bar showed no
+  split at all.
+
 ## 0.12.1
 
 ### Fixed
